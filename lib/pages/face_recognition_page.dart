@@ -31,14 +31,24 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   String attendanceStatus = "Belum";
   String statusMessage = "Posisikan wajah Anda dalam frame";
 
+  // Blink detection variables
+  bool _isLivenessCheckActive = false;
+  bool _hasDetectedBlink = false;
+  int _blinkCount = 0;
+  int _requiredBlinks = 2;
+  double _eyeOpenThreshold = 0.4;
+  List<double> _eyeOpennesHistory = [];
+  int _maxHistorySize = 10;
+  bool _canProceedWithVerification = false;
+
   @override
   void initState() {
     super.initState();
     _faceDetector = FaceDetector(
       options: FaceDetectorOptions(
         enableContours: true,
-        enableClassification: true,
-        performanceMode: FaceDetectorMode.fast,
+        enableClassification: true, // Enable untuk blink detection
+        performanceMode: FaceDetectorMode.accurate, // Lebih akurat
       ),
     );
 
@@ -88,7 +98,19 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   void _flipCamera() async {
     _selectedCameraIndex = (_selectedCameraIndex + 1) % widget.cameras.length;
     await _controller.dispose();
+    _resetBlinkDetection();
     _initCamera();
+  }
+
+  void _resetBlinkDetection() {
+    setState(() {
+      _isLivenessCheckActive = false;
+      _hasDetectedBlink = false;
+      _blinkCount = 0;
+      _eyeOpennesHistory.clear();
+      _canProceedWithVerification = false;
+      statusMessage = "Posisikan wajah Anda dalam frame";
+    });
   }
 
   String getAttendanceStatus(DateTime now) {
@@ -100,6 +122,44 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     } else {
       return "Late";
     }
+  }
+
+  bool _detectBlink(Face face) {
+    // Cek apakah mata kiri dan kanan terdeteksi
+    final leftEye = face.leftEyeOpenProbability;
+    final rightEye = face.rightEyeOpenProbability;
+
+    if (leftEye == null || rightEye == null) return false;
+
+    // Rata-rata probabilitas mata terbuka
+    final avgEyeOpenness = (leftEye + rightEye) / 2;
+
+    // Tambahkan ke history
+    _eyeOpennesHistory.add(avgEyeOpenness);
+    if (_eyeOpennesHistory.length > _maxHistorySize) {
+      _eyeOpennesHistory.removeAt(0);
+    }
+
+    // Deteksi kedipan berdasarkan perubahan dari terbuka ke tertutup ke terbuka
+    if (_eyeOpennesHistory.length >= 3) {
+      final recent = _eyeOpennesHistory.sublist(_eyeOpennesHistory.length - 3);
+
+      // Pola: mata terbuka -> tertutup -> terbuka
+      if (recent[0] > _eyeOpenThreshold && // Mata terbuka
+          recent[1] < _eyeOpenThreshold && // Mata tertutup (kedip)
+          recent[2] > _eyeOpenThreshold) { // Mata terbuka lagi
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  void _startLivenessCheck() {
+    setState(() {
+      _isLivenessCheckActive = true;
+      statusMessage = "Silakan berkedip $_requiredBlinks kali untuk verifikasi";
+    });
   }
 
   void _startDetection() {
@@ -139,42 +199,74 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
         if (mounted) {
           setState(() {
             _faces = faces;
-            if (faces.isNotEmpty) {
-              statusMessage = "Wajah terdeteksi, sedang memverifikasi...";
-            } else {
-              statusMessage = "Posisikan wajah Anda dalam frame";
-            }
           });
 
-          final result = await _apiService.verifyFace(faces.isNotEmpty);
-          if (mounted && result["success"]) {
-            final now = DateTime.now();
-            final formattedTime =
-                "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}";
+          if (faces.isNotEmpty) {
+            final face = faces.first;
 
-            final status = getAttendanceStatus(now);
-
-            setState(() {
-              attendanceStatus = "Berhasil";
-              statusMessage = "Absensi berhasil: ${result["name"]} ($formattedTime)";
-            });
-
-            // Trigger success animation
-            _successController.forward().then((_) {
-              Future.delayed(Duration(milliseconds: 500), () {
-                _successController.reverse();
-              });
-            });
-
-            // Update attendance list
-            final existingIndex = attendanceList.indexWhere(
-                    (item) => item["name"] == result["name"]);
-
-            if (existingIndex != -1) {
-              if (attendanceList[existingIndex]["time"] == "-") {
-                attendanceList[existingIndex]["time"] = formattedTime;
-                attendanceList[existingIndex]["status"] = status;
+            if (!_isLivenessCheckActive && !_canProceedWithVerification) {
+              // Mulai liveness check
+              _startLivenessCheck();
+            } else if (_isLivenessCheckActive && !_canProceedWithVerification) {
+              // Proses blink detection
+              if (_detectBlink(face)) {
+                _blinkCount++;
+                setState(() {
+                  if (_blinkCount >= _requiredBlinks) {
+                    _canProceedWithVerification = true;
+                    _isLivenessCheckActive = false;
+                    statusMessage = "Verifikasi liveness berhasil! Memverifikasi wajah...";
+                  } else {
+                    statusMessage = "Berkedip lagi (${_requiredBlinks - _blinkCount} kali lagi)";
+                  }
+                });
               }
+            } else if (_canProceedWithVerification) {
+              // Lakukan verifikasi wajah setelah liveness check berhasil
+              final result = await _apiService.verifyFace(true);
+              if (mounted && result["success"]) {
+                final now = DateTime.now();
+                final formattedTime =
+                    "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}";
+
+                final status = getAttendanceStatus(now);
+
+                setState(() {
+                  attendanceStatus = "Berhasil";
+                  statusMessage = "Absensi berhasil: ${result["name"]} ($formattedTime)";
+                });
+
+                // Trigger success animation
+                _successController.forward().then((_) {
+                  Future.delayed(Duration(milliseconds: 500), () {
+                    _successController.reverse();
+                  });
+                });
+
+                // Update attendance list
+                final existingIndex = attendanceList.indexWhere(
+                        (item) => item["name"] == result["name"]);
+
+                if (existingIndex != -1) {
+                  if (attendanceList[existingIndex]["time"] == "-") {
+                    attendanceList[existingIndex]["time"] = formattedTime;
+                    attendanceList[existingIndex]["status"] = status;
+                  }
+                }
+
+                // Reset untuk scan berikutnya
+                Future.delayed(Duration(seconds: 3), () {
+                  _resetBlinkDetection();
+                });
+              }
+            }
+          } else {
+            // Tidak ada wajah terdeteksi
+            if (!_canProceedWithVerification) {
+              setState(() {
+                statusMessage = "Posisikan wajah Anda dalam frame";
+              });
+              _resetBlinkDetection();
             }
           }
         }
@@ -283,7 +375,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             child: Container(
               margin: EdgeInsets.only(top: 120, bottom: 180),
               width: MediaQuery.of(context).size.width - 32,
-              height: (MediaQuery.of(context).size.width - 32) * 4/3, // Standard 4:3 ratio
+              height: (MediaQuery.of(context).size.width - 32) * 4/3,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(24),
                 boxShadow: [
@@ -311,7 +403,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             ),
           ),
 
-          // Face detection overlay with proper scaling
+          // Face detection overlay
           Center(
             child: Container(
               margin: EdgeInsets.only(top: 120, bottom: 180),
@@ -327,13 +419,14 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                       _controller.value.previewSize!.width,
                     ),
                     animation: _pulseAnimation,
+                    isLivenessActive: _isLivenessCheckActive,
                   ),
                 ),
               ),
             ),
           ),
 
-          // Top status card - lebih ke bawah
+          // Status card
           Positioned(
             top: 140,
             left: 24,
@@ -349,6 +442,8 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                       gradient: LinearGradient(
                         colors: attendanceStatus == "Berhasil"
                             ? [Colors.green.shade400, Colors.green.shade600]
+                            : _isLivenessCheckActive
+                            ? [Colors.orange.shade400, Colors.orange.shade600]
                             : [Colors.blue.shade400, Colors.blue.shade600],
                       ),
                       borderRadius: BorderRadius.circular(20),
@@ -356,6 +451,8 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                         BoxShadow(
                           color: (attendanceStatus == "Berhasil"
                               ? Colors.green
+                              : _isLivenessCheckActive
+                              ? Colors.orange
                               : Colors.blue)
                               .withOpacity(0.3),
                           blurRadius: 12,
@@ -393,10 +490,44 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             ),
           ),
 
-          // Face count indicator - posisi lebih ke bawah dan tidak mepet
+          // Blink counter
+          if (_isLivenessCheckActive)
+            Positioned(
+              top: 210,
+              left: 24,
+              child: Container(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withOpacity(0.9),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.remove_red_eye,
+                      color: Colors.white,
+                      size: 16,
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      "Kedipan: $_blinkCount/$_requiredBlinks",
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        fontFamily: 'Poppins',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // Face count indicator
           Positioned(
             top: 210,
-            left: 24,
+            left: _isLivenessCheckActive ? 180 : 24,
             child: Container(
               padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
@@ -430,7 +561,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             ),
           ),
 
-          // Bottom instruction card - posisi lebih ke atas
+          // Bottom instruction card
           Positioned(
             bottom: 120,
             left: 24,
@@ -460,7 +591,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
-                          Icons.info_outline,
+                          _isLivenessCheckActive
+                              ? Icons.remove_red_eye
+                              : Icons.info_outline,
                           color: Colors.blue.shade600,
                           size: 20,
                         ),
@@ -471,7 +604,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              "Instruksi Scan",
+                              _isLivenessCheckActive
+                                  ? "Instruksi Kedip"
+                                  : "Instruksi Scan",
                               style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w600,
@@ -480,7 +615,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                               ),
                             ),
                             Text(
-                              "Posisikan wajah dalam frame dan tunggu",
+                              _isLivenessCheckActive
+                                  ? "Berkedip $_requiredBlinks kali untuk verifikasi anti-foto"
+                                  : "Posisikan wajah dalam frame dan tunggu",
                               style: TextStyle(
                                 fontSize: 12,
                                 color: Colors.black54,
@@ -506,11 +643,13 @@ class ModernFacePainter extends CustomPainter {
   final List<Face> faces;
   final Size imageSize;
   final Animation<double> animation;
+  final bool isLivenessActive;
 
   ModernFacePainter({
     required this.faces,
     required this.imageSize,
     required this.animation,
+    required this.isLivenessActive,
   }) : super(repaint: animation);
 
   @override
@@ -521,26 +660,26 @@ class ModernFacePainter extends CustomPainter {
     final double scaleX = size.width / imageSize.width;
     final double scaleY = size.height / imageSize.height;
 
-    // Use the same scale for both dimensions to maintain aspect ratio
     final double scale = scaleX < scaleY ? scaleX : scaleY;
-
-    // Calculate offset to center the scaled content
     final double offsetX = (size.width - (imageSize.width * scale)) / 2;
     final double offsetY = (size.height - (imageSize.height * scale)) / 2;
 
-    // Animated paint for face detection
+    // Warna berbeda untuk liveness check
+    final Color frameColor = isLivenessActive
+        ? Colors.orange
+        : Colors.greenAccent;
+
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3.0 * animation.value
-      ..color = Colors.greenAccent.withOpacity(0.8);
+      ..color = frameColor.withOpacity(0.8);
 
     final shadowPaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 6.0 * animation.value
-      ..color = Colors.green.withOpacity(0.3);
+      ..color = frameColor.withOpacity(0.3);
 
     for (Face face in faces) {
-      // Apply proper scaling and offset
       final rect = Rect.fromLTRB(
         (face.boundingBox.left * scale) + offsetX,
         (face.boundingBox.top * scale) + offsetY,
@@ -565,8 +704,9 @@ class ModernFacePainter extends CustomPainter {
       final cornerPaint = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 4.0
-        ..color = Colors.green;
+        ..color = frameColor;
 
+      // Draw corners (sama seperti sebelumnya)
       // Top-left corner
       canvas.drawPath(
         Path()
@@ -611,5 +751,7 @@ class ModernFacePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(ModernFacePainter oldDelegate) =>
-      oldDelegate.faces != faces || oldDelegate.animation.value != animation.value;
+      oldDelegate.faces != faces ||
+          oldDelegate.animation.value != animation.value ||
+          oldDelegate.isLivenessActive != isLivenessActive;
 }

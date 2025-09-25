@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'pages/camera_page.dart'; // ✅ masuk ke halaman CameraPage dulu
+import 'pages/home_page.dart';
+// ✅ Hapus import camera_page.dart karena sudah tidak diperlukan
 
 late List<CameraDescription> cameras;
 
@@ -18,8 +19,15 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Absensi App',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(primarySwatch: Colors.blue),
-      home: CameraPage(cameras: cameras), // ✅ bukan FaceRecognitionPage
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        fontFamily: 'Poppins',
+        textTheme: const TextTheme(
+          headlineLarge: TextStyle(fontWeight: FontWeight.w600),
+          bodyLarge: TextStyle(fontWeight: FontWeight.w400),
+        ),
+      ),
+      home: HomePage(cameras: cameras),
     );
   }
 }

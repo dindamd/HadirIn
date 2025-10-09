@@ -1,9 +1,11 @@
 // lib/pages/face_recognition_page.dart
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+// import 'package:http_parser/http_parser.dart'; // tidak perlu di file ini
 import '../services/api_service.dart';
 import 'admin_login_page.dart';
 import 'attendance_page.dart';
@@ -27,20 +29,31 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
   final ApiService _apiService = ApiService();
 
-  bool _isDetecting = false;
+  bool _isProcessingFrame = false;
   int _selectedCameraIndex = 0;
   List<Face> _faces = [];
   String attendanceStatus = "Belum";
   String statusMessage = "Posisikan wajah Anda dalam frame";
 
-  // Blink detection variables
+  // Blink detection
   bool _isLivenessCheckActive = false;
   int _blinkCount = 0;
-  int _requiredBlinks = 2;
-  double _eyeOpenThreshold = 0.4;
-  List<double> _eyeOpennesHistory = [];
-  int _maxHistorySize = 10;
+  final int _requiredBlinks = 2;
+  final double _eyeOpenThreshold = 0.4;
+  final List<double> _eyeOpennesHistory = [];
+  final int _maxHistorySize = 10;
   bool _canProceedWithVerification = false;
+
+  // Guards & stabilizer pasca-liveness
+  bool _verifying = false;                 // cegah multiple verify
+  bool _awaitingStableOpen = false;        // fase setelah kedip terpenuhi
+  int _consecutiveOpenFrames = 0;          // butuh open berturut-turut
+  final int _stableOpenTarget = 6;         // jumlah frame open stabil
+  Rect? _prevBox;                          // cek stabilitas gerak
+
+  // Throttle pemrosesan frame
+  DateTime _lastProc = DateTime.fromMillisecondsSinceEpoch(0);
+  final int _minFrameGapMs = 120; // ~8 fps
 
   @override
   void initState() {
@@ -48,9 +61,10 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
     _faceDetector = FaceDetector(
       options: FaceDetectorOptions(
-        enableContours: true,
-        enableClassification: true, // Untuk blink detection
-        performanceMode: FaceDetectorMode.accurate,
+        enableContours: false,               // ringan; blink tetap jalan
+        enableClassification: true,          // perlu untuk blink
+        performanceMode: FaceDetectorMode.fast,
+        minFaceSize: 0.2,
       ),
     );
 
@@ -76,8 +90,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   Future<void> _initCamera() async {
     _controller = CameraController(
       widget.cameras[_selectedCameraIndex],
-      ResolutionPreset.max,
+      ResolutionPreset.high,                 // cukup tajam tanpa berat
       enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420, // YUV untuk stream agar lancar
     );
     await _controller.initialize();
     if (!mounted) return;
@@ -85,9 +100,22 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     _startDetection();
   }
 
+  void _startDetection() {
+    if (!_controller.value.isStreamingImages) {
+      _controller.startImageStream(_onCameraImage);
+    }
+  }
+
+  void _stopDetection() async {
+    if (_controller.value.isStreamingImages) {
+      try { await _controller.stopImageStream(); } catch (_) {}
+    }
+  }
+
   void _flipCamera() async {
-    _selectedCameraIndex = (_selectedCameraIndex + 1) % widget.cameras.length;
+    _stopDetection(); // pastikan stop dulu agar tidak double stream
     await _controller.dispose();
+    _selectedCameraIndex = (_selectedCameraIndex + 1) % widget.cameras.length;
     _resetBlinkDetection();
     _initCamera();
   }
@@ -98,6 +126,10 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       _blinkCount = 0;
       _eyeOpennesHistory.clear();
       _canProceedWithVerification = false;
+      _awaitingStableOpen = false;
+      _consecutiveOpenFrames = 0;
+      _prevBox = null;
+      _faces = [];
       statusMessage = "Posisikan wajah Anda dalam frame";
     });
   }
@@ -142,113 +174,221 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     });
   }
 
-  void _startDetection() {
-    _controller.startImageStream((CameraImage image) async {
-      if (_isDetecting) return;
-      _isDetecting = true;
+  // IoU untuk cek stabilitas posisi wajah antar frame
+  double _iou(Rect a, Rect b) {
+    final interLeft = math.max(a.left, b.left);
+    final interTop = math.max(a.top, b.top);
+    final interRight = math.min(a.right, b.right);
+    final interBottom = math.min(a.bottom, b.bottom);
+    final interW = math.max(0, interRight - interLeft);
+    final interH = math.max(0, interBottom - interTop);
+    final inter = interW * interH;
+    final union = a.width * a.height + b.width * b.height - inter;
+    if (union <= 0) return 0;
+    return inter / union;
+  }
 
-      try {
-        final bytes = image.planes.fold<Uint8List>(
-          Uint8List(0),
-              (previous, plane) => Uint8List.fromList(previous + plane.bytes),
-        );
+  Future<void> _onCameraImage(CameraImage image) async {
+    // throttle & guard
+    final now = DateTime.now();
+    if (_isProcessingFrame || _verifying ||
+        now.difference(_lastProc).inMilliseconds < _minFrameGapMs) {
+      return;
+    }
+    _lastProc = now;
+    _isProcessingFrame = true;
 
-        final imageSize = Size(image.width.toDouble(), image.height.toDouble());
+    try {
+      // gabungkan bytes dari semua plane
+      final bytes = image.planes.fold<Uint8List>(
+        Uint8List(0),
+            (prev, plane) => Uint8List.fromList(prev + plane.bytes),
+      );
 
-        final rotation = InputImageRotationValue.fromRawValue(
-            widget.cameras[_selectedCameraIndex].sensorOrientation) ??
-            InputImageRotation.rotation0deg;
+      final imageSize = Size(image.width.toDouble(), image.height.toDouble());
+      final rotation = InputImageRotationValue.fromRawValue(
+          widget.cameras[_selectedCameraIndex].sensorOrientation) ??
+          InputImageRotation.rotation0deg;
 
-        const format = InputImageFormat.nv21;
-        final plane = image.planes.first;
+      // Kompatibel dengan google_mlkit_commons 0.11.0 (tanpa planeData)
+      final inputImageFormat = Platform.isAndroid
+          ? InputImageFormat.nv21
+          : InputImageFormat.bgra8888; // iOS
 
-        final inputImage = InputImage.fromBytes(
-          bytes: bytes,
-          metadata: InputImageMetadata(
-            size: imageSize,
-            rotation: rotation,
-            format: format,
-            bytesPerRow: plane.bytesPerRow,
-          ),
-        );
+      final inputImage = InputImage.fromBytes(
+        bytes: bytes,
+        metadata: InputImageMetadata(
+          size: imageSize,
+          rotation: rotation,
+          format: inputImageFormat,
+          bytesPerRow: image.planes.first.bytesPerRow, // cukup first plane
+        ),
+      );
 
-        final faces = await _faceDetector.processImage(inputImage);
+      final faces = await _faceDetector.processImage(inputImage);
+      if (!mounted) return;
 
-        if (mounted) {
-          setState(() {
-            _faces = faces;
-          });
-
-          if (faces.isNotEmpty) {
-            final face = faces.first;
-
-            if (!_isLivenessCheckActive && !_canProceedWithVerification) {
-              _startLivenessCheck();
-            } else if (_isLivenessCheckActive && !_canProceedWithVerification) {
-              if (_detectBlink(face)) {
-                _blinkCount++;
-                if (_blinkCount >= _requiredBlinks) {
-                  _canProceedWithVerification = true;
-                  _isLivenessCheckActive = false;
-                  statusMessage = "Verifikasi liveness berhasil! Memverifikasi wajah...";
-                } else {
-                  statusMessage = "Berkedip lagi (${_requiredBlinks - _blinkCount} kali lagi)";
-                }
-              }
-            } else if (_canProceedWithVerification) {
-              // Ambil foto dan kirim ke backend
-              final XFile picture = await _controller.takePicture();
-              final File imageFile = File(picture.path);
-
-              final result = await _apiService.verifyFace(imageFile);
-
-              if (result["success"]) {
-                final now = DateTime.now();
-                final formattedTime =
-                    "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}";
-                final status = getAttendanceStatus(now);
-
-                setState(() {
-                  attendanceStatus = "Berhasil";
-                  statusMessage = "Absensi berhasil: ${result["name"]} ($formattedTime)";
-                });
-
-                _successController.forward().then((_) {
-                  Future.delayed(const Duration(milliseconds: 500), () {
-                    _successController.reverse();
-                  });
-                });
-
-                Future.delayed(const Duration(seconds: 3), () {
-                  _resetBlinkDetection();
-                });
-              } else {
-                setState(() {
-                  attendanceStatus = "Gagal";
-                  statusMessage = "Verifikasi gagal: ${result["message"]}";
-                });
-
-                Future.delayed(const Duration(seconds: 3), () {
-                  _resetBlinkDetection();
-                });
-              }
-            }
-          } else {
-            if (!_canProceedWithVerification) {
-              _resetBlinkDetection();
-            }
-          }
+      if (faces.isEmpty) {
+        setState(() {
+          _faces = [];
+        });
+        _eyeOpennesHistory.clear();
+        if (!_canProceedWithVerification) {
+          _resetBlinkDetection();
         }
-      } catch (e) {
-        debugPrint("❌ Error face detection: $e");
+        _isProcessingFrame = false;
+        return;
       }
 
-      _isDetecting = false;
-    });
+      // pilih wajah terbesar
+      faces.sort((a, b) => b.boundingBox.height.compareTo(a.boundingBox.height));
+      final face = faces.first;
+
+      setState(() {
+        _faces = [face];
+      });
+
+      // Mulai liveness jika belum
+      if (!_isLivenessCheckActive && !_canProceedWithVerification) {
+        _startLivenessCheck();
+      }
+      // Hitung kedip
+      else if (_isLivenessCheckActive && !_canProceedWithVerification) {
+        if (_detectBlink(face)) {
+          _blinkCount++;
+          if (_blinkCount >= _requiredBlinks) {
+            _canProceedWithVerification = true;
+            _isLivenessCheckActive = false;
+            _awaitingStableOpen = false;
+            _consecutiveOpenFrames = 0;
+            _prevBox = null;
+            setState(() {
+              statusMessage = "Verifikasi liveness berhasil! Tahan pandangan...";
+            });
+          } else {
+            setState(() {
+              statusMessage = "Berkedip lagi (${_requiredBlinks - _blinkCount} kali lagi)";
+            });
+          }
+        }
+      }
+      // Pasca-liveness: tunggu mata terbuka stabil beberapa frame
+      else if (_canProceedWithVerification && !_verifying) {
+        final l = face.leftEyeOpenProbability ?? 1.0;
+        final r = face.rightEyeOpenProbability ?? 1.0;
+        final bothOpen = (l > 0.5 && r > 0.5);
+        final box = face.boundingBox;
+
+        if (!_awaitingStableOpen) {
+          _awaitingStableOpen = true;
+          _consecutiveOpenFrames = 0;
+          _prevBox = null;
+          setState(() {
+            statusMessage = "Tahan pandangan ke kamera...";
+          });
+        }
+
+        if (bothOpen) {
+          if (_prevBox == null) {
+            _consecutiveOpenFrames += 1;
+          } else {
+            final iou = _iou(_prevBox!, box);
+            if (iou >= 0.6) {
+              _consecutiveOpenFrames += 1;
+            } else {
+              _consecutiveOpenFrames = 0; // gerak terlalu banyak
+            }
+          }
+        } else {
+          _consecutiveOpenFrames = 0; // mata tertutup lagi
+        }
+        _prevBox = box;
+
+        if (_consecutiveOpenFrames >= _stableOpenTarget) {
+          // Saatnya foto → stop stream → delay → takePicture → kirim
+          _verifying = true;
+          _awaitingStableOpen = false;
+          _canProceedWithVerification = false;
+
+          setState(() {
+            statusMessage = "Mengambil foto...";
+          });
+
+          try {
+            _stopDetection(); // hentikan stream dulu
+            await Future.delayed(const Duration(milliseconds: 300)); // autoexposure settle
+            final XFile shot = await _controller.takePicture();
+            final File imageFile = File(shot.path);
+
+            setState(() {
+              statusMessage = "Mengirim & memverifikasi...";
+            });
+
+            final result = await _apiService.verifyFace(imageFile);
+            if (!mounted) return;
+
+            if (result["success"] == true) {
+              final now = DateTime.now();
+              final hh = now.hour.toString().padLeft(2, '0');
+              final mm = now.minute.toString().padLeft(2, '0');
+              final status = getAttendanceStatus(now);
+
+              setState(() {
+                attendanceStatus = "Berhasil";
+                statusMessage = "Absensi berhasil: ${result["name"]} ($hh:$mm) • $status";
+              });
+
+              await _successController.forward();
+              await Future.delayed(const Duration(milliseconds: 800));
+              await _successController.reverse();
+
+              // SIKLUS SELESAI → reset & siap percobaan berikutnya
+              _resetBlinkDetection();
+              _verifying = false;
+              if (mounted && !_controller.value.isStreamingImages) {
+                try { _startDetection(); } catch (_) {}
+              }
+            } else {
+              setState(() {
+                attendanceStatus = "Gagal";
+                statusMessage = "Verifikasi gagal: ${result["message"] ?? 'Tidak dikenali'}";
+              });
+
+              await Future.delayed(const Duration(seconds: 2));
+              _resetBlinkDetection();
+              _verifying = false;
+              if (mounted && !_controller.value.isStreamingImages) {
+                try { _startDetection(); } catch (_) {}
+              }
+            }
+          } catch (e) {
+            debugPrint("❌ Error capture/verify: $e");
+            if (mounted) {
+              setState(() {
+                attendanceStatus = "Gagal";
+                statusMessage = "Terjadi kesalahan saat mengambil/mengirim foto.";
+              });
+            }
+            await Future.delayed(const Duration(seconds: 2));
+            _resetBlinkDetection();
+            _verifying = false;
+            if (mounted && !_controller.value.isStreamingImages) {
+              try { _startDetection(); } catch (_) {}
+            }
+          }
+          // TIDAK ADA finally yang mereset state
+        }
+      }
+    } catch (e) {
+      debugPrint("❌ Error face detection: $e");
+    } finally {
+      _isProcessingFrame = false;
+    }
   }
 
   @override
   void dispose() {
+    _stopDetection();
     _controller.dispose();
     _faceDetector.close();
     _pulseController.dispose();
@@ -283,9 +423,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             icon: const Icon(Icons.admin_panel_settings_outlined),
             onPressed: () {
               Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => const AdminLoginPage()));
+                context,
+                MaterialPageRoute(builder: (_) => const AdminLoginPage()),
+              );
             },
           ),
         ],
@@ -298,7 +438,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
               child: CameraPreview(_controller),
             ),
           ),
-          // Face overlay, blink, status
+          // Face overlay, blink, status (UI TIDAK DIUBAH)
           Positioned(
             top: 20,
             left: 20,
@@ -306,8 +446,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             child: Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.5),
-                  borderRadius: BorderRadius.circular(12)),
+                color: Colors.black.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(12),
+              ),
               child: Text(
                 statusMessage,
                 style: const TextStyle(color: Colors.white),

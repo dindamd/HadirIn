@@ -1,134 +1,95 @@
-# absensiapp
+# HadirIn App (Face Recognition Attendance System) PT RMDOO TEKNOLOGI INDONESIA
 
-## HadirIn
+Proyek ini merupakan aplikasi absensi berbasis **pengenalan wajah (Face Recognition)** yang dikembangkan untuk memudahkan proses pencatatan kehadiran karyawan secara otomatis.
+Sistem ini dilengkapi dengan **verifikasi kedipan (liveness detection)** untuk memastikan pengguna yang hadir adalah orang sebenarnya, serta halaman **Admin Login** dan **Dashboard Admin** untuk memantau data kehadiran karyawan PT RMDOO TEKNOLOGI INDONESIA.
 
-🧠 Face Recognition Attendance System
+📌 Aplikasi ini dikembangkan sebagai bagian dari pembelajaran pengembangan sistem berbasis biometrik dan manajemen data absensi digital.
 
-Aplikasi absensi mobile berbasis pengenalan wajah (Face Recognition) yang dikembangkan untuk mencatat kehadiran karyawan secara otomatis dan efisien.
-Selain itu, sistem dilengkapi dengan halaman login admin serta dashboard admin untuk memantau dan mengelola data kehadiran karyawan secara real-time.
+---
 
-### Fitur Utama
-👤 Face Recognition Page
+## 📄 Deskripsi
 
-Melakukan absensi dengan pemindaian wajah (scan wajah).
+Aplikasi ini memiliki beberapa halaman utama yang saling terintegrasi:
 
-Dilengkapi dengan verifikasi kedipan (liveness detection) untuk memastikan wajah asli, bukan foto.
+* **Halaman Face Recognition** – Karyawan melakukan absensi dengan memindai wajah dan berkedip dua kali untuk verifikasi.
+* **Halaman Login Admin** – Admin masuk menggunakan username dan password untuk mengakses sistem.
+* **Dashboard Admin** – Menampilkan rekap data kehadiran, status kehadiran karyawan, serta fitur pengelolaan data absensi.
 
-Sistem akan menampilkan notifikasi seperti:
+Data yang dikumpulkan meliputi:
 
-“Silakan berkedip 2 kali untuk verifikasi”
+* Data wajah dan hasil verifikasi,
+* Waktu absensi dan status kehadiran,
+* Alasan ketidakhadiran (izin, sakit, dll),
+* Identitas pengguna yang terhubung dengan sistem.
 
-“Verifikasi berhasil”
+---
 
-“Absensi berhasil”
+## 🧩 Komponen Database
 
-Data yang tersimpan meliputi:
+Struktur database didesain berdasarkan **Entity Relationship Diagram (ERD)** yang menghubungkan beberapa tabel utama:
 
-Wajah pengguna (encoded vector),
+| **Tabel**           | **Fungsi Utama**                                                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Pegawai**         | Menyimpan data karyawan seperti NIK, NIP, tanggal lahir, alamat, telepon, tanggal mulai bekerja, serta relasi dengan user, shift, dan departemen. |
+| **Users**           | Menyimpan akun pengguna sistem termasuk admin dan karyawan, serta relasi dengan peran dan data karyawan.                                          |
+| **Roles**           | Menentukan peran dan hak akses pengguna (misalnya Admin, HRD, atau Karyawan).                                                                     |
+| **Attendance**      | Menyimpan data hasil absensi berbasis wajah, termasuk tanggal absensi, waktu check-in/check-out, dan status kehadiran.                            |
+| **Status_Presensi** | Menyimpan jenis status kehadiran seperti Tepat Waktu, Terlambat, dan Tidak Hadir.                                                                 |
+| **Reason_Presensi** | Menyimpan alasan ketidakhadiran seperti Izin, Sakit, atau Cuti.                                                                                   |
+| **Photo**           | Menyimpan data foto hasil verifikasi wajah yang digunakan untuk proses absensi.                                                                   |
+| **Shift**           | Menyimpan jadwal kerja karyawan, termasuk nama shift, waktu mulai, dan waktu selesai.                                                             |
+| **Departemen**      | Menyimpan data departemen tempat karyawan bekerja beserta deskripsinya.                                                                           |
 
-Waktu absensi,
+---
 
-Status kehadiran (Hadir, Terlambat, Tidak Hadir),
+## 🧰 Teknologi Digunakan
 
-Hasil verifikasi (Live/Not Live).
+* **HTML5** – Struktur tampilan halaman aplikasi.
+* **CSS3** – Desain antarmuka aplikasi.
+* **JavaScript** – Interaktivitas dan logika front-end.
+* **PHP / Laravel** – Pengelolaan data dan backend logic.
+* **MySQL** – Database utama sistem.
+* **OpenCV / Face Recognition Library** – Untuk mendeteksi wajah dan verifikasi kedipan.
 
-🔐 Admin Login Page
+---
 
-Halaman login khusus untuk administrator.
+## 🚀 Cara Menjalankan
 
-Admin harus memasukkan username dan password yang terdaftar untuk mengakses sistem.
+1. Clone repository ini:
 
-Mendukung autentikasi berbasis peran (role-based access control).
+   ```bash
+   git clone https://github.com/username/face-recognition-attendance.git
+   ```
+2. Masuk ke direktori proyek:
 
-Data yang disimpan dalam tabel mencakup:
+   ```bash
+   cd face-recognition-attendance
+   ```
+3. Jalankan server lokal:
 
-Username, password, nama admin, role, email, status akun, dan waktu login terakhir.
+   ```bash
+   php artisan serve
+   ```
+4. Buka di browser:
 
-🖥️ Admin Dashboard Page
+   ```
+   http://localhost:8000
+   ```
 
-Menampilkan rekap kehadiran karyawan secara real-time, termasuk jumlah:
+---
 
-Tepat waktu
+## 🧑‍💼 Tentang Pengembang
 
-Terlambat
+👩‍💻 **Nama:** Adinda Mariasti Dewi
+🎓 **Prodi:** Teknologi Informasi
+📍 **Deskripsi:**
+Pengembang aplikasi *Face Recognition Attendance System* ini yang bertujuan untuk mempermudah sistem absensi berbasis teknologi biometrik, serta sebagai implementasi pembelajaran dalam pengembangan sistem berbasis database dan kecerdasan buatan.
 
-Tidak hadir
+---
 
-Admin dapat melihat daftar nama karyawan beserta status dan alasan ketidakhadirannya.
+## 🪪 Lisensi
 
-Dilengkapi dengan fitur:
+Proyek ini dibuat untuk keperluan pembelajaran dan riset akademik.
+Segala bentuk distribusi atau penggunaan ulang harap mencantumkan sumber dan izin dari pengembang.
 
-Edit data kehadiran,
-
-Input alasan absen,
-
-Logout aman (dengan konfirmasi pop-up).
-
-Data pada dashboard diambil secara otomatis dari tabel Attendance dan Pegawai.
-
-🧩 Struktur Database Utama
-
-Sistem ini terdiri dari beberapa tabel utama yang saling berelasi:
-
-Tabel	Deskripsi Singkat
-Pegawai	Menyimpan data karyawan seperti NIK, nama, departemen, dan shift kerja.
-Users	Menyimpan akun pengguna sistem (admin dan karyawan).
-Roles	Menentukan hak akses pengguna (Admin, HRD, Karyawan).
-Attendance	Mencatat hasil absensi berbasis face recognition.
-Status_Presensi	Menyimpan status kehadiran (Hadir, Terlambat, Tidak Hadir).
-Reason_Presensi	Menyimpan alasan ketidakhadiran (Izin, Sakit, Cuti, dll).
-Photo	Menyimpan data foto wajah yang digunakan untuk verifikasi.
-Shift	Menyimpan jadwal kerja dan waktu mulai/selesai shift.
-Departemen	Menyimpan data struktur departemen perusahaan.
-🏗️ Teknologi yang Digunakan
-
-Frontend: Flutter / React Native (mobile)
-
-Backend: Laravel / Node.js (tergantung implementasi)
-
-Database: MySQL / PostgreSQL
-
-Face Recognition Engine: OpenCV / FaceNet / TensorFlow
-
-Authentication: JWT atau session-based login
-
-⚙️ Cara Menjalankan Proyek
-
-Clone repository ini
-
-git clone https://github.com/username/face-recognition-attendance.git
-
-
-Masuk ke direktori proyek
-
-cd face-recognition-attendance
-
-
-Install dependencies
-
-npm install  # atau composer install untuk Laravel
-
-
-Konfigurasi file .env
-
-Atur koneksi database
-
-Tambahkan API Key jika menggunakan layanan cloud face recognition
-
-Jalankan server lokal
-
-npm run dev  # atau php artisan serve
-
-
-Buka aplikasi di browser / emulator
-
-http://localhost:8000
-
-👥 Peran Pengguna
-Role	Deskripsi
-Admin	Mengelola data karyawan, memantau kehadiran, dan memperbarui catatan absensi.
-Karyawan	Melakukan absensi dengan pemindaian wajah dan melihat status kehadiran pribadi.
-🧾 Lisensi
-
-Proyek ini dikembangkan untuk keperluan riset dan implementasi internal.
-Dilarang memperbanyak atau mendistribusikan tanpa izin pengembang.
+---

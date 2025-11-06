@@ -5,10 +5,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-// import 'package:http_parser/http_parser.dart'; // tidak perlu di file ini
-import '../services/api_service.dart';
+import 'package:image/image.dart' as img;                // <-- NEW (kompres)
+import '../services/api_service.dart';                   // <-- FastApiService & AttendanceApi
 import 'admin_login_page.dart';
-import 'attendance_page.dart';
 
 class FaceRecognitionPage extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -27,33 +26,48 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   late Animation<double> _pulseAnimation;
   late Animation<double> _successAnimation;
 
-  final ApiService _apiService = ApiService();
+  // final ApiService _apiService = ApiService();         // <-- REMOVE (tidak dipakai)
+  final fastApi = FastApiService();                      // <-- NEW
+  final attendanceApi = AttendanceApi();                 // <-- NEW
 
   bool _isProcessingFrame = false;
+  bool _isSwitchingCamera = false;
   int _selectedCameraIndex = 0;
   List<Face> _faces = [];
   String attendanceStatus = "Belum";
   String statusMessage = "Posisikan wajah Anda dalam frame";
 
-  // Blink detection
+  // IN / OUT
+  String _attendanceType = 'IN';
+
+  // Blink detection (dipersingkat)
   bool _isLivenessCheckActive = false;
   int _blinkCount = 0;
-  final int _requiredBlinks = 2;
-  final double _eyeOpenThreshold = 0.4;
+  final int _requiredBlinks = 1;         // 2 -> 1
+  double _openThresh = 0.4;
+  double _closedThresh = 0.35;
   final List<double> _eyeOpennesHistory = [];
-  final int _maxHistorySize = 10;
+  final int _maxHistorySize = 15;
   bool _canProceedWithVerification = false;
 
-  // Guards & stabilizer pasca-liveness
-  bool _verifying = false;                 // cegah multiple verify
-  bool _awaitingStableOpen = false;        // fase setelah kedip terpenuhi
-  int _consecutiveOpenFrames = 0;          // butuh open berturut-turut
-  final int _stableOpenTarget = 6;         // jumlah frame open stabil
-  Rect? _prevBox;                          // cek stabilitas gerak
+  // Debounce blink
+  DateTime _lastBlinkAt = DateTime.fromMillisecondsSinceEpoch(0);
+  final int _minBlinkIntervalMs = 400;
 
-  // Throttle pemrosesan frame
+  // Stabilizer
+  bool _verifying = false;
+  bool _awaitingStableOpen = false;
+  int _consecutiveOpenFrames = 0;
+  final int _stableOpenTarget = 2;       // 5 -> 2
+  Rect? _prevBox;
+
+  // Throttle
   DateTime _lastProc = DateTime.fromMillisecondsSinceEpoch(0);
-  final int _minFrameGapMs = 120; // ~8 fps
+  final int _minFrameGapMs = 66;         // 100 -> 66 (~15fps)
+
+  // Session timeout
+  final int _maxSessionSecs = 12;        // 20 -> 12
+  late DateTime _sessionDeadline;
 
   @override
   void initState() {
@@ -61,10 +75,10 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
     _faceDetector = FaceDetector(
       options: FaceDetectorOptions(
-        enableContours: false,               // ringan; blink tetap jalan
-        enableClassification: true,          // perlu untuk blink
+        enableContours: false,
+        enableClassification: true,
         performanceMode: FaceDetectorMode.fast,
-        minFaceSize: 0.2,
+        minFaceSize: 0.3,
       ),
     );
 
@@ -84,15 +98,79 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     _successAnimation = Tween<double>(begin: 0.0, end: 1.0)
         .animate(CurvedAnimation(parent: _successController, curve: Curves.elasticOut));
 
+    // kamera depan jika ada
+    _selectedCameraIndex = widget.cameras.indexWhere(
+          (c) => c.lensDirection == CameraLensDirection.front,
+    );
+    if (_selectedCameraIndex < 0) _selectedCameraIndex = 0;
+
     _initCamera();
+
+    // pilih IN/OUT setelah frame pertama
+    WidgetsBinding.instance.addPostFrameCallback((_) => _pickType());
+  }
+
+  Future<void> _pickType() async {
+    final sel = await showModalBottomSheet<String>(
+      context: context,
+      isDismissible: false,      // <<--- tidak bisa tap luar untuk nutup
+      enableDrag: false,         // <<--- tidak bisa geser untuk nutup
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  "Pilih jenis absensi",
+                  style: TextStyle(color: Colors.white, fontSize: 16),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.login, color: Colors.white),
+                title: const Text("Check-In", style: TextStyle(color: Colors.white)),
+                onTap: () => Navigator.pop(context, 'IN'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.logout, color: Colors.white),
+                title: const Text("Check-Out", style: TextStyle(color: Colors.white)),
+                onTap: () => Navigator.pop(context, 'OUT'),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (!mounted) return;
+
+    // Kalau somehow sel == null (mis. user tekan back), tampilkan lagi
+    if (sel == null) {
+      // ulangi sampai user pilih
+      await _pickType();
+      return;
+    }
+
+    setState(() {
+      _attendanceType = (sel == 'OUT') ? 'OUT' : 'IN';
+      statusMessage = _attendanceType == 'IN'
+          ? "Mode: Check-In • Posisi wajah dalam frame"
+          : "Mode: Check-Out • Posisi wajah dalam frame";
+    });
   }
 
   Future<void> _initCamera() async {
     _controller = CameraController(
       widget.cameras[_selectedCameraIndex],
-      ResolutionPreset.high,                 // cukup tajam tanpa berat
+      ResolutionPreset.medium,                // lebih kecil & cepat
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.yuv420, // YUV untuk stream agar lancar
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
     await _controller.initialize();
     if (!mounted) return;
@@ -101,6 +179,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   }
 
   void _startDetection() {
+    _startSessionTimer();
     if (!_controller.value.isStreamingImages) {
       _controller.startImageStream(_onCameraImage);
     }
@@ -112,15 +191,28 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     }
   }
 
-  void _flipCamera() async {
-    _stopDetection(); // pastikan stop dulu agar tidak double stream
-    await _controller.dispose();
-    _selectedCameraIndex = (_selectedCameraIndex + 1) % widget.cameras.length;
-    _resetBlinkDetection();
-    _initCamera();
+  Future<void> _flipCamera() async {
+    if (_isSwitchingCamera) return;
+    setState(() => _isSwitchingCamera = true);
+
+    try {
+      _stopDetection();
+      try { await _controller.dispose(); } catch (_) {}
+      _selectedCameraIndex = (_selectedCameraIndex + 1) % widget.cameras.length;
+      _resetBlinkDetection();
+      await _initCamera();
+    } finally {
+      if (mounted) setState(() => _isSwitchingCamera = false);
+    }
   }
 
-  void _resetBlinkDetection() {
+  void _startSessionTimer() {
+    _sessionDeadline = DateTime.now().add(Duration(seconds: _maxSessionSecs));
+  }
+
+  bool _sessionExpired() => DateTime.now().isAfter(_sessionDeadline);
+
+  void _resetBlinkDetection({String? message}) {
     setState(() {
       _isLivenessCheckActive = false;
       _blinkCount = 0;
@@ -130,51 +222,45 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       _consecutiveOpenFrames = 0;
       _prevBox = null;
       _faces = [];
-      statusMessage = "Posisikan wajah Anda dalam frame";
+      statusMessage = message ?? "Posisikan wajah Anda dalam frame";
     });
+    _startSessionTimer();
   }
 
   bool _detectBlink(Face face) {
-    final leftEye = face.leftEyeOpenProbability;
-    final rightEye = face.rightEyeOpenProbability;
+    final l = face.leftEyeOpenProbability;
+    final r = face.rightEyeOpenProbability;
+    if (l == null || r == null) return false;
 
-    if (leftEye == null || rightEye == null) return false;
-
-    final avgEyeOpenness = (leftEye + rightEye) / 2;
-    _eyeOpennesHistory.add(avgEyeOpenness);
+    final avg = (l + r) / 2;
+    _eyeOpennesHistory.add(avg);
     if (_eyeOpennesHistory.length > _maxHistorySize) {
       _eyeOpennesHistory.removeAt(0);
     }
 
     if (_eyeOpennesHistory.length >= 3) {
       final recent = _eyeOpennesHistory.sublist(_eyeOpennesHistory.length - 3);
-      if (recent[0] > _eyeOpenThreshold &&
-          recent[1] < _eyeOpenThreshold &&
-          recent[2] > _eyeOpenThreshold) {
-        return true;
+      final isBlink = (recent[0] > _openThresh) &&
+          (recent[1] < _closedThresh) &&
+          (recent[2] > _openThresh);
+
+      if (isBlink) {
+        final now = DateTime.now();
+        if (now.difference(_lastBlinkAt).inMilliseconds >= _minBlinkIntervalMs) {
+          _lastBlinkAt = now;
+          return true;
+        }
       }
     }
     return false;
   }
 
-  String getAttendanceStatus(DateTime now) {
-    final hour = now.hour;
-    final minute = now.minute;
-    if (hour >= 8 && (hour < 10 || (hour == 10 && minute == 0))) {
-      return "On Time";
-    } else {
-      return "Late";
-    }
+  String _remainingSecText() {
+    final left = _sessionDeadline.difference(DateTime.now()).inSeconds;
+    final clamped = left < 0 ? 0 : left;
+    return "sisa ${clamped}s";
   }
 
-  void _startLivenessCheck() {
-    setState(() {
-      _isLivenessCheckActive = true;
-      statusMessage = "Silakan berkedip $_requiredBlinks kali untuk verifikasi";
-    });
-  }
-
-  // IoU untuk cek stabilitas posisi wajah antar frame
   double _iou(Rect a, Rect b) {
     final interLeft = math.max(a.left, b.left);
     final interTop = math.max(a.top, b.top);
@@ -189,6 +275,16 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   }
 
   Future<void> _onCameraImage(CameraImage image) async {
+    // timeout sesi
+    if (_sessionExpired() && !_verifying) {
+      _stopDetection();
+      setState(() { statusMessage = "Waktu habis (>${_maxSessionSecs}s). Coba lagi."; });
+      await Future.delayed(const Duration(milliseconds: 800));
+      _resetBlinkDetection();
+      _startDetection();
+      return;
+    }
+
     // throttle & guard
     final now = DateTime.now();
     if (_isProcessingFrame || _verifying ||
@@ -199,7 +295,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     _isProcessingFrame = true;
 
     try {
-      // gabungkan bytes dari semua plane
+      // gabungkan bytes (YUV)
       final bytes = image.planes.fold<Uint8List>(
         Uint8List(0),
             (prev, plane) => Uint8List.fromList(prev + plane.bytes),
@@ -207,13 +303,12 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
       final imageSize = Size(image.width.toDouble(), image.height.toDouble());
       final rotation = InputImageRotationValue.fromRawValue(
-          widget.cameras[_selectedCameraIndex].sensorOrientation) ??
-          InputImageRotation.rotation0deg;
+          widget.cameras[_selectedCameraIndex].sensorOrientation
+      ) ?? InputImageRotation.rotation0deg;
 
-      // Kompatibel dengan google_mlkit_commons 0.11.0 (tanpa planeData)
       final inputImageFormat = Platform.isAndroid
           ? InputImageFormat.nv21
-          : InputImageFormat.bgra8888; // iOS
+          : InputImageFormat.bgra8888;
 
       final inputImage = InputImage.fromBytes(
         bytes: bytes,
@@ -221,7 +316,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
           size: imageSize,
           rotation: rotation,
           format: inputImageFormat,
-          bytesPerRow: image.planes.first.bytesPerRow, // cukup first plane
+          bytesPerRow: image.planes.first.bytesPerRow,
         ),
       );
 
@@ -231,11 +326,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       if (faces.isEmpty) {
         setState(() {
           _faces = [];
+          statusMessage = "Wajah belum terdeteksi • ${_remainingSecText()}";
         });
         _eyeOpennesHistory.clear();
-        if (!_canProceedWithVerification) {
-          _resetBlinkDetection();
-        }
         _isProcessingFrame = false;
         return;
       }
@@ -244,13 +337,15 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       faces.sort((a, b) => b.boundingBox.height.compareTo(a.boundingBox.height));
       final face = faces.first;
 
-      setState(() {
-        _faces = [face];
-      });
+      setState(() { _faces = [face]; });
 
       // Mulai liveness jika belum
       if (!_isLivenessCheckActive && !_canProceedWithVerification) {
-        _startLivenessCheck();
+        _isLivenessCheckActive = true;
+        setState(() {
+          statusMessage = "Silakan berkedip $_requiredBlinks kali (≤ ${_maxSessionSecs}s)";
+        });
+        _startSessionTimer();
       }
       // Hitung kedip
       else if (_isLivenessCheckActive && !_canProceedWithVerification) {
@@ -263,29 +358,31 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             _consecutiveOpenFrames = 0;
             _prevBox = null;
             setState(() {
-              statusMessage = "Verifikasi liveness berhasil! Tahan pandangan...";
+              statusMessage = "Liveness OK • Tahan pandangan… ${_remainingSecText()}";
             });
           } else {
             setState(() {
-              statusMessage = "Berkedip lagi (${_requiredBlinks - _blinkCount} kali lagi)";
+              statusMessage = "Berkedip lagi (${_requiredBlinks - _blinkCount}) • ${_remainingSecText()}";
             });
           }
+        } else {
+          setState(() {
+            statusMessage = "Berkedip $_requiredBlinks× • ${_remainingSecText()}";
+          });
         }
       }
-      // Pasca-liveness: tunggu mata terbuka stabil beberapa frame
+      // Pasca-liveness: tunggu mata terbuka stabil (2 frame)
       else if (_canProceedWithVerification && !_verifying) {
         final l = face.leftEyeOpenProbability ?? 1.0;
         final r = face.rightEyeOpenProbability ?? 1.0;
-        final bothOpen = (l > 0.5 && r > 0.5);
+        final bothOpen = (l > _openThresh && r > _openThresh);
         final box = face.boundingBox;
 
         if (!_awaitingStableOpen) {
           _awaitingStableOpen = true;
           _consecutiveOpenFrames = 0;
           _prevBox = null;
-          setState(() {
-            statusMessage = "Tahan pandangan ke kamera...";
-          });
+          setState(() { statusMessage = "Tahan pandangan… ${_remainingSecText()}"; });
         }
 
         if (bothOpen) {
@@ -293,80 +390,101 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             _consecutiveOpenFrames += 1;
           } else {
             final iou = _iou(_prevBox!, box);
-            if (iou >= 0.6) {
-              _consecutiveOpenFrames += 1;
-            } else {
-              _consecutiveOpenFrames = 0; // gerak terlalu banyak
-            }
+            if (iou >= 0.6) _consecutiveOpenFrames += 1;
+            else _consecutiveOpenFrames = 0;
           }
         } else {
-          _consecutiveOpenFrames = 0; // mata tertutup lagi
+          _consecutiveOpenFrames = 0;
         }
         _prevBox = box;
 
         if (_consecutiveOpenFrames >= _stableOpenTarget) {
-          // Saatnya foto → stop stream → delay → takePicture → kirim
           _verifying = true;
           _awaitingStableOpen = false;
           _canProceedWithVerification = false;
 
-          setState(() {
-            statusMessage = "Mengambil foto...";
-          });
+          setState(() { statusMessage = "Mengambil foto…"; });
 
           try {
-            _stopDetection(); // hentikan stream dulu
-            await Future.delayed(const Duration(milliseconds: 300)); // autoexposure settle
+            _stopDetection();
+            await Future.delayed(const Duration(milliseconds: 200));
             final XFile shot = await _controller.takePicture();
-            final File imageFile = File(shot.path);
+            File uploadFile = File(shot.path);
 
-            setState(() {
-              statusMessage = "Mengirim & memverifikasi...";
-            });
-
-            final result = await _apiService.verifyFace(imageFile);
-            if (!mounted) return;
-
-            if (result["success"] == true) {
-              final now = DateTime.now();
-              final hh = now.hour.toString().padLeft(2, '0');
-              final mm = now.minute.toString().padLeft(2, '0');
-              final status = getAttendanceStatus(now);
-
-              setState(() {
-                attendanceStatus = "Berhasil";
-                statusMessage = "Absensi berhasil: ${result["name"]} ($hh:$mm) • $status";
-              });
-
-              await _successController.forward();
-              await Future.delayed(const Duration(milliseconds: 800));
-              await _successController.reverse();
-
-              // SIKLUS SELESAI → reset & siap percobaan berikutnya
-              _resetBlinkDetection();
-              _verifying = false;
-              if (mounted && !_controller.value.isStreamingImages) {
-                try { _startDetection(); } catch (_) {}
+            // Kompres 800px / quality 85
+            try {
+              final raw = await uploadFile.readAsBytes();
+              final decoded = img.decodeImage(raw);
+              if (decoded != null) {
+                final resized = img.copyResize(decoded, width: 800);
+                final outJpg = img.encodeJpg(resized, quality: 85);
+                final tempPath = '${uploadFile.path}.compressed.jpg';
+                uploadFile = await File(tempPath).writeAsBytes(outJpg);
               }
-            } else {
+            } catch (_) {}
+
+            setState(() { statusMessage = "Memverifikasi…"; });
+
+            // 1) Verifikasi ke FastAPI
+            final fa = await fastApi.verifyFace(uploadFile);
+            if (fa['success'] != true) {
               setState(() {
                 attendanceStatus = "Gagal";
-                statusMessage = "Verifikasi gagal: ${result["message"] ?? 'Tidak dikenali'}";
+                statusMessage = "FastAPI gagal: ${fa['message'] ?? 'Tidak dikenali'}";
               });
-
               await Future.delayed(const Duration(seconds: 2));
               _resetBlinkDetection();
               _verifying = false;
               if (mounted && !_controller.value.isStreamingImages) {
                 try { _startDetection(); } catch (_) {}
               }
+              return;
             }
+
+            final faData = (fa['data'] as Map<String, dynamic>);
+            final name = (faData['user'] ?? 'Unknown').toString();
+            final distance = (faData['distance'] as num?)?.toDouble();
+            final gap = (faData['gap'] as num?)?.toDouble();
+
+            // 2) Catat ke Laravel
+            final save = await attendanceApi.saveAttendance(
+              name: name,
+              type: _attendanceType, // 'IN'/'OUT'
+              distance: distance,
+              gap: gap,
+            );
+
+            if (save['success'] == true) {
+              final now2 = DateTime.now();
+              final hh = now2.hour.toString().padLeft(2, '0');
+              final mm = now2.minute.toString().padLeft(2, '0');
+              setState(() {
+                attendanceStatus = "Berhasil";
+                statusMessage = "${_attendanceType == 'IN' ? 'Check-In' : 'Check-Out'}: $name ($hh:$mm)";
+              });
+              await _successController.forward();
+              await Future.delayed(const Duration(milliseconds: 600));
+              await _successController.reverse();
+            } else {
+              setState(() {
+                attendanceStatus = "Gagal";
+                statusMessage = "Simpan absensi gagal: ${save['message'] ?? 'Unknown error'}";
+              });
+              await Future.delayed(const Duration(seconds: 2));
+            }
+
+            _resetBlinkDetection();
+            _verifying = false;
+            if (mounted && !_controller.value.isStreamingImages) {
+              try { _startDetection(); } catch (_) {}
+            }
+
           } catch (e) {
             debugPrint("❌ Error capture/verify: $e");
             if (mounted) {
               setState(() {
                 attendanceStatus = "Gagal";
-                statusMessage = "Terjadi kesalahan saat mengambil/mengirim foto.";
+                statusMessage = "Kesalahan saat mengambil/mengirim foto.";
               });
             }
             await Future.delayed(const Duration(seconds: 2));
@@ -376,7 +494,8 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
               try { _startDetection(); } catch (_) {}
             }
           }
-          // TIDAK ADA finally yang mereset state
+        } else {
+          setState(() { statusMessage = "Tahan pandangan… ${_remainingSecText()}"; });
         }
       }
     } catch (e) {
@@ -398,12 +517,10 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
   @override
   Widget build(BuildContext context) {
-    if (!_controller.value.isInitialized) {
+    if (_isSwitchingCamera || !_controller.value.isInitialized) {
       return Scaffold(
         backgroundColor: Colors.black,
-        body: const Center(
-          child: CircularProgressIndicator(color: Colors.blue),
-        ),
+        body: const Center(child: CircularProgressIndicator(color: Colors.blue)),
       );
     }
 
@@ -422,10 +539,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
           IconButton(
             icon: const Icon(Icons.admin_panel_settings_outlined),
             onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const AdminLoginPage()),
-              );
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminLoginPage()));
             },
           ),
         ],
@@ -435,10 +549,11 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
           Center(
             child: ClipRRect(
               borderRadius: BorderRadius.circular(24),
-              child: CameraPreview(_controller),
+              child: _controller.value.isInitialized
+                  ? CameraPreview(_controller)
+                  : const SizedBox.shrink(),
             ),
           ),
-          // Face overlay, blink, status (UI TIDAK DIUBAH)
           Positioned(
             top: 20,
             left: 20,
@@ -449,10 +564,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                 color: Colors.black.withOpacity(0.5),
                 borderRadius: BorderRadius.circular(12),
               ),
-              child: Text(
-                statusMessage,
-                style: const TextStyle(color: Colors.white),
-              ),
+              child: Text(statusMessage, style: const TextStyle(color: Colors.white)),
             ),
           ),
         ],

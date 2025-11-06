@@ -1,84 +1,137 @@
+// lib/services/api_service.dart
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
-import 'dart:async'; // Tambahkan ini
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 
+/// ====== CONFIG CEPAT (ubah IP di sini saja) ======
+const String kFastApiBase = "https://sustained-grand-opinions-wav.trycloudflare.com"; // FastAPI
+const String kLaravelBase = "http://192.168.1.31:8000"; // Laravel
+Uri _u(String base, String p) => Uri.parse("$base${p.startsWith('/') ? p : '/$p'}");
 
-class ApiService {
-  static const String baseUrl = "http://192.168.1.28:8000";
-  static const String attendanceEndpoint = "/api/face-verify"; // sesuai FaceController
-
-  final String? bearerToken;
-  ApiService({this.bearerToken});
-
+/// ====== FASTAPI: verifikasi wajah (upload foto) ======
+class FastApiService {
   Future<Map<String, dynamic>> verifyFace(File imageFile) async {
-    final url = Uri.parse("$baseUrl$attendanceEndpoint");
-
-    final req = http.MultipartRequest('POST', url)
-      ..fields['client_ts'] = DateTime.now().toIso8601String()
+    final req = http.MultipartRequest('POST', _u(kFastApiBase, '/verify-face'))
       ..files.add(await http.MultipartFile.fromPath(
-        'image',                // WAJIB sama: $request->file('image')
+        'image',
         imageFile.path,
-        contentType: MediaType('image','jpeg'),
+        contentType: MediaType('image', 'jpeg'),
       ));
 
-    if (bearerToken != null && bearerToken!.isNotEmpty) {
-      req.headers['Authorization'] = 'Bearer $bearerToken';
+    final streamed = await req.send().timeout(const Duration(seconds: 15));
+    final res = await http.Response.fromStream(streamed);
+
+    Map<String, dynamic>? jsonBody;
+    try { jsonBody = json.decode(res.body); } catch (_) {}
+
+    if (res.statusCode == 200 && (jsonBody?['success'] == true)) {
+      return {'success': true, 'data': jsonBody};
     }
-    req.headers['Idempotency-Key'] = _randomIdemKey();
+    return {
+      'success': false,
+      'message': jsonBody?['message'] ?? 'FastAPI gagal (${res.statusCode})',
+      'raw': res.body,
+      'code': res.statusCode,
+    };
+  }
+}
 
-    try {
-      final streamed = await req.send().timeout(const Duration(seconds: 12));
-      final resp = await http.Response.fromStream(streamed);
-      final code = resp.statusCode;
-      final body = resp.body;
+/// ====== LARAVEL: simpan & tarik data attendance ======
+class AttendanceApi {
+  /// Simpan hasil absensi (jalur baru): Flutter -> Laravel JSON kecil
+  Future<Map<String, dynamic>> saveAttendance({
+    required String name,
+    required String type, // 'IN' | 'OUT'
+    double? distance,
+    double? gap,
+  }) async {
+    final body = {
+      'name': name,
+      'type': type,
+      if (distance != null) 'distance': distance, // kirim angka
+      if (gap != null) 'gap': gap,                 // kirim angka
+      'client_ts': DateTime.now().toIso8601String(),
+    };
 
-      if (kDebugMode) print("🔎 Laravel resp ($code): $body");
+    final res = await http
+        .post(
+      _u(kLaravelBase, '/api/attendance'),
+      headers: {'Content-Type': 'application/json'},
+      body: json.encode(body),
+    )
+        .timeout(const Duration(seconds: 10));
 
-      Map<String, dynamic>? jsonBody;
-      try { jsonBody = json.decode(body); } catch (_) {}
+    Map<String, dynamic>? jsonBody;
+    try { jsonBody = json.decode(res.body); } catch (_) {}
 
-      // Laravel kamu mengembalikan:
-      // - success: { "status":"success", "data": {...}, "fastapi_response": {...} }
-      // - gagal:   { "status":"failed", "reason": "...", "fastapi_raw": "..." } (400)
-      // - error:   { "status":"error", "message": "..." } (500)
-      if (jsonBody != null) {
-        final status = (jsonBody['status'] ?? '').toString();
-
-        if (status == 'success') {
-          final name = (jsonBody['fastapi_response']?['user'] ??
-              jsonBody['data']?['name'] ??
-              'Unknown').toString();
-          return {"success": true, "name": name, "raw": jsonBody};
-        }
-
-        final msg = (jsonBody['reason'] ??
-            jsonBody['message'] ??
-            'Verifikasi gagal (kode: $code)').toString();
-        return {"success": false, "message": msg, "code": code, "raw": jsonBody};
-      }
-
-      // Fallback kalau bukan JSON
-      if (code == 200) return {"success": true, "message": "OK", "raw": body};
-      return {"success": false, "message": "Server error: $code", "raw": body};
-
-    } on SocketException {
-      return {"success": false, "message": "Tidak bisa terhubung ke server."};
-    } on HttpException {
-      return {"success": false, "message": "Kesalahan HTTP saat mengirim data."};
-    } on TimeoutException {
-      return {"success": false, "message": "Timeout: server lambat/tidak merespons."};
-    } catch (e) {
-      return {"success": false, "message": "Gagal mengirim data: $e"};
+    if (res.statusCode >= 200 && res.statusCode < 300 && jsonBody?['success'] == true) {
+      return {'success': true, 'data': jsonBody};
     }
+    return {
+      'success': false,
+      'message': jsonBody?['message'] ?? 'Gagal simpan absensi (${res.statusCode})',
+      'raw': res.body,
+      'code': res.statusCode,
+    };
   }
 
-  String _randomIdemKey() {
-    final r = math.Random();
-    final bytes = List<int>.generate(16, (_) => r.nextInt(256));
-    return base64UrlEncode(bytes);
+  /// Ambil daftar kehadiran HARI INI untuk dashboard admin
+  /// GET /api/admin/attendance/today
+  Future<Map<String, dynamic>> fetchTodayAttendance() async {
+    final res = await http
+        .get(_u(kLaravelBase, '/api/admin/attendance/today'))
+        .timeout(const Duration(seconds: 10));
+
+    Map<String, dynamic>? jsonBody;
+    try { jsonBody = json.decode(res.body); } catch (_) {}
+
+    if (res.statusCode >= 200 && res.statusCode < 300 && jsonBody?['success'] == true) {
+      return {'success': true, 'data': jsonBody};
+    }
+    return {
+      'success': false,
+      'message': jsonBody?['message'] ?? 'Gagal ambil data (${res.statusCode})',
+      'raw': res.body,
+      'code': res.statusCode,
+    };
+  }
+
+  /// UPDATE status hari ini (admin)
+  /// POST /api/admin/attendance/update
+  /// Body: { name, status: 'On Time'|'Late'|'Absent', reason?, time?('HH:MM') }
+  Future<Map<String, dynamic>> updateToday({
+    required String name,
+    required String status,
+    String? reason,
+    String? time,
+  }) async {
+    final body = <String, dynamic>{
+      'name': name,
+      'status': status,
+      if (reason != null) 'reason': reason,
+      if (time != null) 'time': time,
+    };
+
+    final res = await http
+        .post(
+      _u(kLaravelBase, '/api/admin/attendance/update'),
+      headers: {'Content-Type': 'application/json'},
+      body: json.encode(body),
+    )
+        .timeout(const Duration(seconds: 10));
+
+    Map<String, dynamic>? jsonBody;
+    try { jsonBody = json.decode(res.body); } catch (_) {}
+
+    if (res.statusCode >= 200 && res.statusCode < 300 && (jsonBody?['success'] == true)) {
+      return {'success': true};
+    }
+    return {
+      'success': false,
+      'message': jsonBody?['message'] ?? 'Gagal update (${res.statusCode})',
+      'raw': res.body,
+      'code': res.statusCode,
+    };
   }
 }

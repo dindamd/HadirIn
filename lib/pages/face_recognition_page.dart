@@ -5,8 +5,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import 'package:image/image.dart' as img;                // <-- NEW (kompres)
-import '../services/api_service.dart';                   // <-- FastApiService & AttendanceApi
+import 'package:image/image.dart' as img;                // kompres
+import '../services/api_service.dart';                   // FastApiService & AttendanceApi
 import 'admin_login_page.dart';
 
 class FaceRecognitionPage extends StatefulWidget {
@@ -26,9 +26,8 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   late Animation<double> _pulseAnimation;
   late Animation<double> _successAnimation;
 
-  // final ApiService _apiService = ApiService();         // <-- REMOVE (tidak dipakai)
-  final fastApi = FastApiService();                      // <-- NEW
-  final attendanceApi = AttendanceApi();                 // <-- NEW
+  final fastApi = FastApiService();
+  final attendanceApi = AttendanceApi();
 
   bool _isProcessingFrame = false;
   bool _isSwitchingCamera = false;
@@ -39,11 +38,12 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
   // IN / OUT
   String _attendanceType = 'IN';
+  bool _typeChosen = false;             // <--- NEW: user sudah pilih tipe?
 
   // Blink detection (dipersingkat)
   bool _isLivenessCheckActive = false;
   int _blinkCount = 0;
-  final int _requiredBlinks = 1;         // 2 -> 1
+  final int _requiredBlinks = 1;
   double _openThresh = 0.4;
   double _closedThresh = 0.35;
   final List<double> _eyeOpennesHistory = [];
@@ -58,15 +58,15 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   bool _verifying = false;
   bool _awaitingStableOpen = false;
   int _consecutiveOpenFrames = 0;
-  final int _stableOpenTarget = 2;       // 5 -> 2
+  final int _stableOpenTarget = 2;
   Rect? _prevBox;
 
   // Throttle
   DateTime _lastProc = DateTime.fromMillisecondsSinceEpoch(0);
-  final int _minFrameGapMs = 66;         // 100 -> 66 (~15fps)
+  final int _minFrameGapMs = 66; // ~15fps
 
   // Session timeout
-  final int _maxSessionSecs = 12;        // 20 -> 12
+  final int _maxSessionSecs = 12;
   late DateTime _sessionDeadline;
 
   @override
@@ -82,39 +82,32 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       ),
     );
 
-    _pulseController = AnimationController(
-      duration: const Duration(seconds: 2),
-      vsync: this,
-    )..repeat(reverse: true);
-
-    _successController = AnimationController(
-      duration: const Duration(milliseconds: 600),
-      vsync: this,
-    );
+    _pulseController = AnimationController(duration: const Duration(seconds: 2), vsync: this)..repeat(reverse: true);
+    _successController = AnimationController(duration: const Duration(milliseconds: 600), vsync: this);
 
     _pulseAnimation = Tween<double>(begin: 0.8, end: 1.2)
         .animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
-
     _successAnimation = Tween<double>(begin: 0.0, end: 1.0)
         .animate(CurvedAnimation(parent: _successController, curve: Curves.elasticOut));
 
     // kamera depan jika ada
-    _selectedCameraIndex = widget.cameras.indexWhere(
-          (c) => c.lensDirection == CameraLensDirection.front,
-    );
+    _selectedCameraIndex = widget.cameras.indexWhere((c) => c.lensDirection == CameraLensDirection.front);
     if (_selectedCameraIndex < 0) _selectedCameraIndex = 0;
 
     _initCamera();
 
-    // pilih IN/OUT setelah frame pertama
+    // Tampilkan pemilihan tipe begitu halaman tampil
     WidgetsBinding.instance.addPostFrameCallback((_) => _pickType());
   }
 
   Future<void> _pickType() async {
+    // Pastikan stream berhenti saat sheet dibuka (supaya tidak ada deteksi)
+    await _stopDetection();
+
     final sel = await showModalBottomSheet<String>(
       context: context,
-      isDismissible: false,      // <<--- tidak bisa tap luar untuk nutup
-      enableDrag: false,         // <<--- tidak bisa geser untuk nutup
+      isDismissible: false,   // tidak bisa tap luar untuk nutup
+      enableDrag: false,      // tidak bisa geser untuk nutup
       backgroundColor: Colors.grey[900],
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
@@ -126,10 +119,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             children: [
               const Padding(
                 padding: EdgeInsets.all(16),
-                child: Text(
-                  "Pilih jenis absensi",
-                  style: TextStyle(color: Colors.white, fontSize: 16),
-                ),
+                child: Text("Pilih jenis absensi", style: TextStyle(color: Colors.white, fontSize: 16)),
               ),
               ListTile(
                 leading: const Icon(Icons.login, color: Colors.white),
@@ -150,44 +140,50 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
     if (!mounted) return;
 
-    // Kalau somehow sel == null (mis. user tekan back), tampilkan lagi
+    // Kalau user tekan back → minta lagi
     if (sel == null) {
-      // ulangi sampai user pilih
       await _pickType();
       return;
     }
 
     setState(() {
       _attendanceType = (sel == 'OUT') ? 'OUT' : 'IN';
+      _typeChosen = true; // <-- sudah memilih
       statusMessage = _attendanceType == 'IN'
           ? "Mode: Check-In • Posisi wajah dalam frame"
           : "Mode: Check-Out • Posisi wajah dalam frame";
     });
+
+    // Mulai deteksi setelah tipe dipilih
+    _startDetection();
   }
 
   Future<void> _initCamera() async {
     _controller = CameraController(
       widget.cameras[_selectedCameraIndex],
-      ResolutionPreset.medium,                // lebih kecil & cepat
+      ResolutionPreset.medium,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
     await _controller.initialize();
     if (!mounted) return;
     setState(() {});
-    _startDetection();
+    // NOTE: Jangan startDetection di sini. Mulai hanya setelah _typeChosen = true.
   }
 
   void _startDetection() {
+    if (!_typeChosen) return; // safety: jangan mulai sebelum pilih tipe
     _startSessionTimer();
     if (!_controller.value.isStreamingImages) {
       _controller.startImageStream(_onCameraImage);
     }
   }
 
-  void _stopDetection() async {
+  Future<void> _stopDetection() async {
     if (_controller.value.isStreamingImages) {
-      try { await _controller.stopImageStream(); } catch (_) {}
+      try {
+        await _controller.stopImageStream();
+      } catch (_) {}
     }
   }
 
@@ -196,11 +192,12 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     setState(() => _isSwitchingCamera = true);
 
     try {
-      _stopDetection();
+      await _stopDetection();
       try { await _controller.dispose(); } catch (_) {}
       _selectedCameraIndex = (_selectedCameraIndex + 1) % widget.cameras.length;
       _resetBlinkDetection();
       await _initCamera();
+      _startDetection(); // lanjutkan kalau sudah pilih tipe
     } finally {
       if (mounted) setState(() => _isSwitchingCamera = false);
     }
@@ -269,15 +266,18 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     final interW = math.max(0, interRight - interLeft);
     final interH = math.max(0, interBottom - interTop);
     final inter = interW * interH;
-    final union = a.width * a.height + b.width * b.height - inter;
+    final union = a.width * a.height + b.height * b.width - inter;
     if (union <= 0) return 0;
     return inter / union;
   }
 
   Future<void> _onCameraImage(CameraImage image) async {
+    // ==== HARD GUARD: kalau belum pilih tipe, abaikan semua frame ====
+    if (!_typeChosen) return;
+
     // timeout sesi
     if (_sessionExpired() && !_verifying) {
-      _stopDetection();
+      await _stopDetection();
       setState(() { statusMessage = "Waktu habis (>${_maxSessionSecs}s). Coba lagi."; });
       await Future.delayed(const Duration(milliseconds: 800));
       _resetBlinkDetection();
@@ -406,7 +406,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
           setState(() { statusMessage = "Mengambil foto…"; });
 
           try {
-            _stopDetection();
+            await _stopDetection();
             await Future.delayed(const Duration(milliseconds: 200));
             final XFile shot = await _controller.takePicture();
             File uploadFile = File(shot.path);
@@ -435,9 +435,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
               await Future.delayed(const Duration(seconds: 2));
               _resetBlinkDetection();
               _verifying = false;
-              if (mounted && !_controller.value.isStreamingImages) {
-                try { _startDetection(); } catch (_) {}
-              }
+              if (mounted) _startDetection();
               return;
             }
 
@@ -475,9 +473,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
             _resetBlinkDetection();
             _verifying = false;
-            if (mounted && !_controller.value.isStreamingImages) {
-              try { _startDetection(); } catch (_) {}
-            }
+            if (mounted) _startDetection();
 
           } catch (e) {
             debugPrint("❌ Error capture/verify: $e");
@@ -490,9 +486,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             await Future.delayed(const Duration(seconds: 2));
             _resetBlinkDetection();
             _verifying = false;
-            if (mounted && !_controller.value.isStreamingImages) {
-              try { _startDetection(); } catch (_) {}
-            }
+            if (mounted) _startDetection();
           }
         } else {
           setState(() { statusMessage = "Tahan pandangan… ${_remainingSecText()}"; });
@@ -530,12 +524,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: const Text("Face Recognition"),
+        title: Text("Face Recognition (${_typeChosen ? _attendanceType : 'Pilih Tipe'})"),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.cameraswitch_outlined),
-            onPressed: _flipCamera,
-          ),
+          IconButton(icon: const Icon(Icons.cameraswitch_outlined), onPressed: _flipCamera),
           IconButton(
             icon: const Icon(Icons.admin_panel_settings_outlined),
             onPressed: () {

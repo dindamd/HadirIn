@@ -6,8 +6,8 @@ import 'package:http_parser/http_parser.dart';
 
 /// ====== CONFIG CEPAT (ubah IP di sini saja) ======
 /// NOTE: FastAPI via Cloudflare, Laravel via LAN IPv4
-const String kFastApiBase = "https://sierra-sentences-usgs-viking.trycloudflare.com";
-const String kLaravelBase = "http://192.168.1.29:8000";
+const String kFastApiBase = "https://outdoor-silicon-loaded-veteran.trycloudflare.com";
+const String kLaravelBase = "http://192.168.1.3:8000";
 Uri _u(String base, String p) => Uri.parse("$base${p.startsWith('/') ? p : '/$p'}");
 
 Map<String, dynamic> _err(Object e) => {

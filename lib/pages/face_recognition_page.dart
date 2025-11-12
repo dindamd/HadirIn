@@ -1,10 +1,13 @@
+// lib/pages/face_recognition_page.dart
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import '../services/api_service.dart';
+import 'package:image/image.dart' as img;                // kompres
+import '../services/api_service.dart';                   // FastApiService & AttendanceApi
 import 'admin_login_page.dart';
-import 'attendance_page.dart';
-import 'dart:typed_data';
 
 class FaceRecognitionPage extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -23,265 +26,482 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   late Animation<double> _pulseAnimation;
   late Animation<double> _successAnimation;
 
-  final ApiService _apiService = ApiService();
+  final fastApi = FastApiService();
+  final attendanceApi = AttendanceApi();
 
-  bool _isDetecting = false;
+  bool _isProcessingFrame = false;
+  bool _isSwitchingCamera = false;
   int _selectedCameraIndex = 0;
   List<Face> _faces = [];
   String attendanceStatus = "Belum";
   String statusMessage = "Posisikan wajah Anda dalam frame";
 
-  // Blink detection variables
+  // IN / OUT
+  String _attendanceType = 'IN';
+  bool _typeChosen = false;             // <--- NEW: user sudah pilih tipe?
+
+  // Blink detection (dipersingkat)
   bool _isLivenessCheckActive = false;
-  bool _hasDetectedBlink = false;
   int _blinkCount = 0;
-  int _requiredBlinks = 2;
-  double _eyeOpenThreshold = 0.4;
-  List<double> _eyeOpennesHistory = [];
-  int _maxHistorySize = 10;
+  final int _requiredBlinks = 1;
+  double _openThresh = 0.4;
+  double _closedThresh = 0.35;
+  final List<double> _eyeOpennesHistory = [];
+  final int _maxHistorySize = 15;
   bool _canProceedWithVerification = false;
+
+  // Debounce blink
+  DateTime _lastBlinkAt = DateTime.fromMillisecondsSinceEpoch(0);
+  final int _minBlinkIntervalMs = 400;
+
+  // Stabilizer
+  bool _verifying = false;
+  bool _awaitingStableOpen = false;
+  int _consecutiveOpenFrames = 0;
+  final int _stableOpenTarget = 2;
+  Rect? _prevBox;
+
+  // Throttle
+  DateTime _lastProc = DateTime.fromMillisecondsSinceEpoch(0);
+  final int _minFrameGapMs = 66; // ~15fps
+
+  // Session timeout
+  final int _maxSessionSecs = 12;
+  late DateTime _sessionDeadline;
 
   @override
   void initState() {
     super.initState();
+
     _faceDetector = FaceDetector(
       options: FaceDetectorOptions(
-        enableContours: true,
-        enableClassification: true, // Enable untuk blink detection
-        performanceMode: FaceDetectorMode.accurate, // Lebih akurat
+        enableContours: false,
+        enableClassification: true,
+        performanceMode: FaceDetectorMode.fast,
+        minFaceSize: 0.3,
       ),
     );
 
-    // Setup animations
-    _pulseController = AnimationController(
-      duration: const Duration(seconds: 2),
-      vsync: this,
-    )..repeat(reverse: true);
+    _pulseController = AnimationController(duration: const Duration(seconds: 2), vsync: this)..repeat(reverse: true);
+    _successController = AnimationController(duration: const Duration(milliseconds: 600), vsync: this);
 
-    _successController = AnimationController(
-      duration: const Duration(milliseconds: 600),
-      vsync: this,
-    );
+    _pulseAnimation = Tween<double>(begin: 0.8, end: 1.2)
+        .animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
+    _successAnimation = Tween<double>(begin: 0.0, end: 1.0)
+        .animate(CurvedAnimation(parent: _successController, curve: Curves.elasticOut));
 
-    _pulseAnimation = Tween<double>(
-      begin: 0.8,
-      end: 1.2,
-    ).animate(CurvedAnimation(
-      parent: _pulseController,
-      curve: Curves.easeInOut,
-    ));
-
-    _successAnimation = Tween<double>(
-      begin: 0.0,
-      end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _successController,
-      curve: Curves.elasticOut,
-    ));
+    // kamera depan jika ada
+    _selectedCameraIndex = widget.cameras.indexWhere((c) => c.lensDirection == CameraLensDirection.front);
+    if (_selectedCameraIndex < 0) _selectedCameraIndex = 0;
 
     _initCamera();
+
+    // Tampilkan pemilihan tipe begitu halaman tampil
+    WidgetsBinding.instance.addPostFrameCallback((_) => _pickType());
+  }
+
+  Future<void> _pickType() async {
+    // Pastikan stream berhenti saat sheet dibuka (supaya tidak ada deteksi)
+    await _stopDetection();
+
+    final sel = await showModalBottomSheet<String>(
+      context: context,
+      isDismissible: false,   // tidak bisa tap luar untuk nutup
+      enableDrag: false,      // tidak bisa geser untuk nutup
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text("Pilih jenis absensi", style: TextStyle(color: Colors.white, fontSize: 16)),
+              ),
+              ListTile(
+                leading: const Icon(Icons.login, color: Colors.white),
+                title: const Text("Check-In", style: TextStyle(color: Colors.white)),
+                onTap: () => Navigator.pop(context, 'IN'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.logout, color: Colors.white),
+                title: const Text("Check-Out", style: TextStyle(color: Colors.white)),
+                onTap: () => Navigator.pop(context, 'OUT'),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (!mounted) return;
+
+    // Kalau user tekan back → minta lagi
+    if (sel == null) {
+      await _pickType();
+      return;
+    }
+
+    setState(() {
+      _attendanceType = (sel == 'OUT') ? 'OUT' : 'IN';
+      _typeChosen = true; // <-- sudah memilih
+      statusMessage = _attendanceType == 'IN'
+          ? "Mode: Check-In • Posisi wajah dalam frame"
+          : "Mode: Check-Out • Posisi wajah dalam frame";
+    });
+
+    // Mulai deteksi setelah tipe dipilih
+    _startDetection();
   }
 
   Future<void> _initCamera() async {
     _controller = CameraController(
       widget.cameras[_selectedCameraIndex],
-      ResolutionPreset.high,
+      ResolutionPreset.medium,
       enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
-
     await _controller.initialize();
     if (!mounted) return;
     setState(() {});
-    _startDetection();
+    // NOTE: Jangan startDetection di sini. Mulai hanya setelah _typeChosen = true.
   }
 
-  void _flipCamera() async {
-    _selectedCameraIndex = (_selectedCameraIndex + 1) % widget.cameras.length;
-    await _controller.dispose();
-    _resetBlinkDetection();
-    _initCamera();
-  }
-
-  void _resetBlinkDetection() {
-    setState(() {
-      _isLivenessCheckActive = false;
-      _hasDetectedBlink = false;
-      _blinkCount = 0;
-      _eyeOpennesHistory.clear();
-      _canProceedWithVerification = false;
-      statusMessage = "Posisikan wajah Anda dalam frame";
-    });
-  }
-
-  String getAttendanceStatus(DateTime now) {
-    final hour = now.hour;
-    final minute = now.minute;
-
-    if (hour >= 8 && (hour < 10 || (hour == 10 && minute == 0))) {
-      return "On Time";
-    } else {
-      return "Late";
+  void _startDetection() {
+    if (!_typeChosen) return; // safety: jangan mulai sebelum pilih tipe
+    _startSessionTimer();
+    if (!_controller.value.isStreamingImages) {
+      _controller.startImageStream(_onCameraImage);
     }
   }
 
+  Future<void> _stopDetection() async {
+    if (_controller.value.isStreamingImages) {
+      try {
+        await _controller.stopImageStream();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _flipCamera() async {
+    if (_isSwitchingCamera) return;
+    setState(() => _isSwitchingCamera = true);
+
+    try {
+      await _stopDetection();
+      try { await _controller.dispose(); } catch (_) {}
+      _selectedCameraIndex = (_selectedCameraIndex + 1) % widget.cameras.length;
+      _resetBlinkDetection();
+      await _initCamera();
+      _startDetection(); // lanjutkan kalau sudah pilih tipe
+    } finally {
+      if (mounted) setState(() => _isSwitchingCamera = false);
+    }
+  }
+
+  void _startSessionTimer() {
+    _sessionDeadline = DateTime.now().add(Duration(seconds: _maxSessionSecs));
+  }
+
+  bool _sessionExpired() => DateTime.now().isAfter(_sessionDeadline);
+
+  void _resetBlinkDetection({String? message}) {
+    setState(() {
+      _isLivenessCheckActive = false;
+      _blinkCount = 0;
+      _eyeOpennesHistory.clear();
+      _canProceedWithVerification = false;
+      _awaitingStableOpen = false;
+      _consecutiveOpenFrames = 0;
+      _prevBox = null;
+      _faces = [];
+      statusMessage = message ?? "Posisikan wajah Anda dalam frame";
+    });
+    _startSessionTimer();
+  }
+
   bool _detectBlink(Face face) {
-    // Cek apakah mata kiri dan kanan terdeteksi
-    final leftEye = face.leftEyeOpenProbability;
-    final rightEye = face.rightEyeOpenProbability;
+    final l = face.leftEyeOpenProbability;
+    final r = face.rightEyeOpenProbability;
+    if (l == null || r == null) return false;
 
-    if (leftEye == null || rightEye == null) return false;
-
-    // Rata-rata probabilitas mata terbuka
-    final avgEyeOpenness = (leftEye + rightEye) / 2;
-
-    // Tambahkan ke history
-    _eyeOpennesHistory.add(avgEyeOpenness);
+    final avg = (l + r) / 2;
+    _eyeOpennesHistory.add(avg);
     if (_eyeOpennesHistory.length > _maxHistorySize) {
       _eyeOpennesHistory.removeAt(0);
     }
 
-    // Deteksi kedipan berdasarkan perubahan dari terbuka ke tertutup ke terbuka
     if (_eyeOpennesHistory.length >= 3) {
       final recent = _eyeOpennesHistory.sublist(_eyeOpennesHistory.length - 3);
+      final isBlink = (recent[0] > _openThresh) &&
+          (recent[1] < _closedThresh) &&
+          (recent[2] > _openThresh);
 
-      // Pola: mata terbuka -> tertutup -> terbuka
-      if (recent[0] > _eyeOpenThreshold && // Mata terbuka
-          recent[1] < _eyeOpenThreshold && // Mata tertutup (kedip)
-          recent[2] > _eyeOpenThreshold) { // Mata terbuka lagi
-        return true;
+      if (isBlink) {
+        final now = DateTime.now();
+        if (now.difference(_lastBlinkAt).inMilliseconds >= _minBlinkIntervalMs) {
+          _lastBlinkAt = now;
+          return true;
+        }
       }
     }
-
     return false;
   }
 
-  void _startLivenessCheck() {
-    setState(() {
-      _isLivenessCheckActive = true;
-      statusMessage = "Silakan berkedip $_requiredBlinks kali untuk verifikasi";
-    });
+  String _remainingSecText() {
+    final left = _sessionDeadline.difference(DateTime.now()).inSeconds;
+    final clamped = left < 0 ? 0 : left;
+    return "sisa ${clamped}s";
   }
 
-  void _startDetection() {
-    _controller.startImageStream((CameraImage image) async {
-      if (_isDetecting) return;
-      _isDetecting = true;
+  double _iou(Rect a, Rect b) {
+    final interLeft = math.max(a.left, b.left);
+    final interTop = math.max(a.top, b.top);
+    final interRight = math.min(a.right, b.right);
+    final interBottom = math.min(a.bottom, b.bottom);
+    final interW = math.max(0, interRight - interLeft);
+    final interH = math.max(0, interBottom - interTop);
+    final inter = interW * interH;
+    final union = a.width * a.height + b.height * b.width - inter;
+    if (union <= 0) return 0;
+    return inter / union;
+  }
 
-      try {
-        final bytes = image.planes.fold<Uint8List>(
-          Uint8List(0),
-              (previous, plane) => Uint8List.fromList(previous + plane.bytes),
-        );
+  Future<void> _onCameraImage(CameraImage image) async {
+    // ==== HARD GUARD: kalau belum pilih tipe, abaikan semua frame ====
+    if (!_typeChosen) return;
 
-        final Size imageSize =
-        Size(image.width.toDouble(), image.height.toDouble());
+    // timeout sesi
+    if (_sessionExpired() && !_verifying) {
+      await _stopDetection();
+      setState(() { statusMessage = "Waktu habis (>${_maxSessionSecs}s). Coba lagi."; });
+      await Future.delayed(const Duration(milliseconds: 800));
+      _resetBlinkDetection();
+      _startDetection();
+      return;
+    }
 
-        final rotation = InputImageRotationValue.fromRawValue(
-          widget.cameras[_selectedCameraIndex].sensorOrientation,
-        ) ??
-            InputImageRotation.rotation0deg;
+    // throttle & guard
+    final now = DateTime.now();
+    if (_isProcessingFrame || _verifying ||
+        now.difference(_lastProc).inMilliseconds < _minFrameGapMs) {
+      return;
+    }
+    _lastProc = now;
+    _isProcessingFrame = true;
 
-        const format = InputImageFormat.nv21;
-        final plane = image.planes.first;
+    try {
+      // gabungkan bytes (YUV)
+      final bytes = image.planes.fold<Uint8List>(
+        Uint8List(0),
+            (prev, plane) => Uint8List.fromList(prev + plane.bytes),
+      );
 
-        final inputImage = InputImage.fromBytes(
-          bytes: bytes,
-          metadata: InputImageMetadata(
-            size: imageSize,
-            rotation: rotation,
-            format: format,
-            bytesPerRow: plane.bytesPerRow,
-          ),
-        );
+      final imageSize = Size(image.width.toDouble(), image.height.toDouble());
+      final rotation = InputImageRotationValue.fromRawValue(
+          widget.cameras[_selectedCameraIndex].sensorOrientation
+      ) ?? InputImageRotation.rotation0deg;
 
-        final faces = await _faceDetector.processImage(inputImage);
+      final inputImageFormat = Platform.isAndroid
+          ? InputImageFormat.nv21
+          : InputImageFormat.bgra8888;
 
-        if (mounted) {
-          setState(() {
-            _faces = faces;
-          });
+      final inputImage = InputImage.fromBytes(
+        bytes: bytes,
+        metadata: InputImageMetadata(
+          size: imageSize,
+          rotation: rotation,
+          format: inputImageFormat,
+          bytesPerRow: image.planes.first.bytesPerRow,
+        ),
+      );
 
-          if (faces.isNotEmpty) {
-            final face = faces.first;
+      final faces = await _faceDetector.processImage(inputImage);
+      if (!mounted) return;
 
-            if (!_isLivenessCheckActive && !_canProceedWithVerification) {
-              // Mulai liveness check
-              _startLivenessCheck();
-            } else if (_isLivenessCheckActive && !_canProceedWithVerification) {
-              // Proses blink detection
-              if (_detectBlink(face)) {
-                _blinkCount++;
-                setState(() {
-                  if (_blinkCount >= _requiredBlinks) {
-                    _canProceedWithVerification = true;
-                    _isLivenessCheckActive = false;
-                    statusMessage = "Verifikasi liveness berhasil! Memverifikasi wajah...";
-                  } else {
-                    statusMessage = "Berkedip lagi (${_requiredBlinks - _blinkCount} kali lagi)";
-                  }
-                });
-              }
-            } else if (_canProceedWithVerification) {
-              // Lakukan verifikasi wajah setelah liveness check berhasil
-              final result = await _apiService.verifyFace(true);
-              if (mounted && result["success"]) {
-                final now = DateTime.now();
-                final formattedTime =
-                    "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}";
-
-                final status = getAttendanceStatus(now);
-
-                setState(() {
-                  attendanceStatus = "Berhasil";
-                  statusMessage = "Absensi berhasil: ${result["name"]} ($formattedTime)";
-                });
-
-                // Trigger success animation
-                _successController.forward().then((_) {
-                  Future.delayed(Duration(milliseconds: 500), () {
-                    _successController.reverse();
-                  });
-                });
-
-                // Update attendance list
-                final existingIndex = attendanceList.indexWhere(
-                        (item) => item["name"] == result["name"]);
-
-                if (existingIndex != -1) {
-                  if (attendanceList[existingIndex]["time"] == "-") {
-                    attendanceList[existingIndex]["time"] = formattedTime;
-                    attendanceList[existingIndex]["status"] = status;
-                  }
-                }
-
-                // Reset untuk scan berikutnya
-                Future.delayed(Duration(seconds: 3), () {
-                  _resetBlinkDetection();
-                });
-              }
-            }
-          } else {
-            // Tidak ada wajah terdeteksi
-            if (!_canProceedWithVerification) {
-              setState(() {
-                statusMessage = "Posisikan wajah Anda dalam frame";
-              });
-              _resetBlinkDetection();
-            }
-          }
-        }
-
-        debugPrint("👤 Detected faces: ${faces.length}");
-      } catch (e) {
-        debugPrint("❌ Error face detection: $e");
+      if (faces.isEmpty) {
+        setState(() {
+          _faces = [];
+          statusMessage = "Wajah belum terdeteksi • ${_remainingSecText()}";
+        });
+        _eyeOpennesHistory.clear();
+        _isProcessingFrame = false;
+        return;
       }
 
-      _isDetecting = false;
-    });
+      // pilih wajah terbesar
+      faces.sort((a, b) => b.boundingBox.height.compareTo(a.boundingBox.height));
+      final face = faces.first;
+
+      setState(() { _faces = [face]; });
+
+      // Mulai liveness jika belum
+      if (!_isLivenessCheckActive && !_canProceedWithVerification) {
+        _isLivenessCheckActive = true;
+        setState(() {
+          statusMessage = "Silakan berkedip $_requiredBlinks kali (≤ ${_maxSessionSecs}s)";
+        });
+        _startSessionTimer();
+      }
+      // Hitung kedip
+      else if (_isLivenessCheckActive && !_canProceedWithVerification) {
+        if (_detectBlink(face)) {
+          _blinkCount++;
+          if (_blinkCount >= _requiredBlinks) {
+            _canProceedWithVerification = true;
+            _isLivenessCheckActive = false;
+            _awaitingStableOpen = false;
+            _consecutiveOpenFrames = 0;
+            _prevBox = null;
+            setState(() {
+              statusMessage = "Liveness OK • Tahan pandangan… ${_remainingSecText()}";
+            });
+          } else {
+            setState(() {
+              statusMessage = "Berkedip lagi (${_requiredBlinks - _blinkCount}) • ${_remainingSecText()}";
+            });
+          }
+        } else {
+          setState(() {
+            statusMessage = "Berkedip $_requiredBlinks× • ${_remainingSecText()}";
+          });
+        }
+      }
+      // Pasca-liveness: tunggu mata terbuka stabil (2 frame)
+      else if (_canProceedWithVerification && !_verifying) {
+        final l = face.leftEyeOpenProbability ?? 1.0;
+        final r = face.rightEyeOpenProbability ?? 1.0;
+        final bothOpen = (l > _openThresh && r > _openThresh);
+        final box = face.boundingBox;
+
+        if (!_awaitingStableOpen) {
+          _awaitingStableOpen = true;
+          _consecutiveOpenFrames = 0;
+          _prevBox = null;
+          setState(() { statusMessage = "Tahan pandangan… ${_remainingSecText()}"; });
+        }
+
+        if (bothOpen) {
+          if (_prevBox == null) {
+            _consecutiveOpenFrames += 1;
+          } else {
+            final iou = _iou(_prevBox!, box);
+            if (iou >= 0.6) _consecutiveOpenFrames += 1;
+            else _consecutiveOpenFrames = 0;
+          }
+        } else {
+          _consecutiveOpenFrames = 0;
+        }
+        _prevBox = box;
+
+        if (_consecutiveOpenFrames >= _stableOpenTarget) {
+          _verifying = true;
+          _awaitingStableOpen = false;
+          _canProceedWithVerification = false;
+
+          setState(() { statusMessage = "Mengambil foto…"; });
+
+          try {
+            await _stopDetection();
+            await Future.delayed(const Duration(milliseconds: 200));
+            final XFile shot = await _controller.takePicture();
+            File uploadFile = File(shot.path);
+
+            // Kompres 800px / quality 85
+            try {
+              final raw = await uploadFile.readAsBytes();
+              final decoded = img.decodeImage(raw);
+              if (decoded != null) {
+                final resized = img.copyResize(decoded, width: 800);
+                final outJpg = img.encodeJpg(resized, quality: 85);
+                final tempPath = '${uploadFile.path}.compressed.jpg';
+                uploadFile = await File(tempPath).writeAsBytes(outJpg);
+              }
+            } catch (_) {}
+
+            setState(() { statusMessage = "Memverifikasi…"; });
+
+            // 1) Verifikasi ke FastAPI
+            final fa = await fastApi.verifyFace(uploadFile);
+            if (fa['success'] != true) {
+              setState(() {
+                attendanceStatus = "Gagal";
+                statusMessage = "FastAPI gagal: ${fa['message'] ?? 'Tidak dikenali'}";
+              });
+              await Future.delayed(const Duration(seconds: 2));
+              _resetBlinkDetection();
+              _verifying = false;
+              if (mounted) _startDetection();
+              return;
+            }
+
+            final faData = (fa['data'] as Map<String, dynamic>);
+            final name = (faData['user'] ?? 'Unknown').toString();
+            final distance = (faData['distance'] as num?)?.toDouble();
+            final gap = (faData['gap'] as num?)?.toDouble();
+
+            // 2) Catat ke Laravel
+            final save = await attendanceApi.saveAttendance(
+              name: name,
+              type: _attendanceType, // 'IN'/'OUT'
+              distance: distance,
+              gap: gap,
+            );
+
+            if (save['success'] == true) {
+              final now2 = DateTime.now();
+              final hh = now2.hour.toString().padLeft(2, '0');
+              final mm = now2.minute.toString().padLeft(2, '0');
+              setState(() {
+                attendanceStatus = "Berhasil";
+                statusMessage = "${_attendanceType == 'IN' ? 'Check-In' : 'Check-Out'}: $name ($hh:$mm)";
+              });
+              await _successController.forward();
+              await Future.delayed(const Duration(milliseconds: 600));
+              await _successController.reverse();
+            } else {
+              setState(() {
+                attendanceStatus = "Gagal";
+                statusMessage = "Simpan absensi gagal: ${save['message'] ?? 'Unknown error'}";
+              });
+              await Future.delayed(const Duration(seconds: 2));
+            }
+
+            _resetBlinkDetection();
+            _verifying = false;
+            if (mounted) _startDetection();
+
+          } catch (e) {
+            debugPrint("❌ Error capture/verify: $e");
+            if (mounted) {
+              setState(() {
+                attendanceStatus = "Gagal";
+                statusMessage = "Kesalahan saat mengambil/mengirim foto.";
+              });
+            }
+            await Future.delayed(const Duration(seconds: 2));
+            _resetBlinkDetection();
+            _verifying = false;
+            if (mounted) _startDetection();
+          }
+        } else {
+          setState(() { statusMessage = "Tahan pandangan… ${_remainingSecText()}"; });
+        }
+      }
+    } catch (e) {
+      debugPrint("❌ Error face detection: $e");
+    } finally {
+      _isProcessingFrame = false;
+    }
   }
 
   @override
   void dispose() {
+    _stopDetection();
     _controller.dispose();
     _faceDetector.close();
     _pulseController.dispose();
@@ -291,33 +511,10 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
   @override
   Widget build(BuildContext context) {
-    if (!_controller.value.isInitialized) {
+    if (_isSwitchingCamera || !_controller.value.isInitialized) {
       return Scaffold(
         backgroundColor: Colors.black,
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                width: 80,
-                height: 80,
-                child: CircularProgressIndicator(
-                  valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
-                  strokeWidth: 4,
-                ),
-              ),
-              SizedBox(height: 24),
-              Text(
-                "Mempersiapkan kamera...",
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontFamily: 'Poppins',
-                ),
-              ),
-            ],
-          ),
-        ),
+        body: const Center(child: CircularProgressIndicator(color: Colors.blue)),
       );
     }
 
@@ -327,431 +524,42 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: Text(
-          "Face Recognition",
-          style: TextStyle(
-            fontFamily: 'Poppins',
-            fontWeight: FontWeight.w600,
-            color: Colors.white,
-          ),
-        ),
-        iconTheme: IconThemeData(color: Colors.white),
+        title: Text("Face Recognition (${_typeChosen ? _attendanceType : 'Pilih Tipe'})"),
         actions: [
-          Container(
-            margin: EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: Colors.black45,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: IconButton(
-              icon: Icon(Icons.cameraswitch_outlined, color: Colors.white),
-              onPressed: _flipCamera,
-              tooltip: 'Flip Camera',
-            ),
-          ),
-          Container(
-            margin: EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: Colors.black45,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: IconButton(
-              icon: Icon(Icons.admin_panel_settings_outlined, color: Colors.white),
-              tooltip: 'Admin',
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const AdminLoginPage()),
-                );
-              },
-            ),
+          IconButton(icon: const Icon(Icons.cameraswitch_outlined), onPressed: _flipCamera),
+          IconButton(
+            icon: const Icon(Icons.admin_panel_settings_outlined),
+            onPressed: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminLoginPage()));
+            },
           ),
         ],
       ),
       body: Stack(
         children: [
-          // Camera Preview with proper sizing
           Center(
-            child: Container(
-              margin: EdgeInsets.only(top: 120, bottom: 180),
-              width: MediaQuery.of(context).size.width - 32,
-              height: (MediaQuery.of(context).size.width - 32) * 4/3,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.blue.withOpacity(0.3),
-                    blurRadius: 20,
-                    spreadRadius: 2,
-                  ),
-                ],
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(24),
-                child: OverflowBox(
-                  alignment: Alignment.center,
-                  child: FittedBox(
-                    fit: BoxFit.cover,
-                    child: SizedBox(
-                      width: MediaQuery.of(context).size.width - 32,
-                      height: (MediaQuery.of(context).size.width - 32) * 4/3,
-                      child: CameraPreview(_controller),
-                    ),
-                  ),
-                ),
-              ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: _controller.value.isInitialized
+                  ? CameraPreview(_controller)
+                  : const SizedBox.shrink(),
             ),
           ),
-
-          // Face detection overlay
-          Center(
-            child: Container(
-              margin: EdgeInsets.only(top: 120, bottom: 180),
-              width: MediaQuery.of(context).size.width - 32,
-              height: (MediaQuery.of(context).size.width - 32) * 4/3,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(24),
-                child: CustomPaint(
-                  painter: ModernFacePainter(
-                    faces: _faces,
-                    imageSize: Size(
-                      _controller.value.previewSize!.height,
-                      _controller.value.previewSize!.width,
-                    ),
-                    animation: _pulseAnimation,
-                    isLivenessActive: _isLivenessCheckActive,
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-          // Status card
           Positioned(
-            top: 140,
-            left: 24,
-            right: 24,
-            child: AnimatedBuilder(
-              animation: _successController,
-              builder: (context, child) {
-                return Transform.scale(
-                  scale: 1.0 + (_successAnimation.value * 0.1),
-                  child: Container(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: attendanceStatus == "Berhasil"
-                            ? [Colors.green.shade400, Colors.green.shade600]
-                            : _isLivenessCheckActive
-                            ? [Colors.orange.shade400, Colors.orange.shade600]
-                            : [Colors.blue.shade400, Colors.blue.shade600],
-                      ),
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
-                        BoxShadow(
-                          color: (attendanceStatus == "Berhasil"
-                              ? Colors.green
-                              : _isLivenessCheckActive
-                              ? Colors.orange
-                              : Colors.blue)
-                              .withOpacity(0.3),
-                          blurRadius: 12,
-                          offset: Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            statusMessage,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                              fontFamily: 'Poppins',
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-
-          // Blink counter
-          if (_isLivenessCheckActive)
-            Positioned(
-              top: 210,
-              left: 24,
-              child: Container(
-                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.orange.withOpacity(0.9),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.remove_red_eye,
-                      color: Colors.white,
-                      size: 16,
-                    ),
-                    SizedBox(width: 8),
-                    Text(
-                      "Kedipan: $_blinkCount/$_requiredBlinks",
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        fontFamily: 'Poppins',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-          // Face count indicator
-          Positioned(
-            top: 210,
-            left: _isLivenessCheckActive ? 180 : 24,
+            top: 20,
+            left: 20,
+            right: 20,
             child: Container(
-              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.7),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                  color: _faces.isNotEmpty ? Colors.green : Colors.orange,
-                  width: 1,
-                ),
+                color: Colors.black.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(12),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.face,
-                    color: _faces.isNotEmpty ? Colors.green : Colors.orange,
-                    size: 16,
-                  ),
-                  SizedBox(width: 8),
-                  Text(
-                    "Wajah: ${_faces.length}",
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      fontFamily: 'Poppins',
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          // Bottom instruction card
-          Positioned(
-            bottom: 120,
-            left: 24,
-            right: 24,
-            child: Container(
-              padding: EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(20),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.1),
-                    blurRadius: 20,
-                    offset: Offset(0, 10),
-                  ),
-                ],
-              ),
-              child: Column(
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          color: Colors.blue.shade50,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Icon(
-                          _isLivenessCheckActive
-                              ? Icons.remove_red_eye
-                              : Icons.info_outline,
-                          color: Colors.blue.shade600,
-                          size: 20,
-                        ),
-                      ),
-                      SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              _isLivenessCheckActive
-                                  ? "Instruksi Kedip"
-                                  : "Instruksi Scan",
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                fontFamily: 'Poppins',
-                                color: Colors.black87,
-                              ),
-                            ),
-                            Text(
-                              _isLivenessCheckActive
-                                  ? "Berkedip $_requiredBlinks kali untuk verifikasi anti-foto"
-                                  : "Posisikan wajah dalam frame dan tunggu",
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.black54,
-                                fontFamily: 'Poppins',
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+              child: Text(statusMessage, style: const TextStyle(color: Colors.white)),
             ),
           ),
         ],
       ),
     );
   }
-}
-
-class ModernFacePainter extends CustomPainter {
-  final List<Face> faces;
-  final Size imageSize;
-  final Animation<double> animation;
-  final bool isLivenessActive;
-
-  ModernFacePainter({
-    required this.faces,
-    required this.imageSize,
-    required this.animation,
-    required this.isLivenessActive,
-  }) : super(repaint: animation);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (faces.isEmpty) return;
-
-    // Proper scaling calculation
-    final double scaleX = size.width / imageSize.width;
-    final double scaleY = size.height / imageSize.height;
-
-    final double scale = scaleX < scaleY ? scaleX : scaleY;
-    final double offsetX = (size.width - (imageSize.width * scale)) / 2;
-    final double offsetY = (size.height - (imageSize.height * scale)) / 2;
-
-    // Warna berbeda untuk liveness check
-    final Color frameColor = isLivenessActive
-        ? Colors.orange
-        : Colors.greenAccent;
-
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0 * animation.value
-      ..color = frameColor.withOpacity(0.8);
-
-    final shadowPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 6.0 * animation.value
-      ..color = frameColor.withOpacity(0.3);
-
-    for (Face face in faces) {
-      final rect = Rect.fromLTRB(
-        (face.boundingBox.left * scale) + offsetX,
-        (face.boundingBox.top * scale) + offsetY,
-        (face.boundingBox.right * scale) + offsetX,
-        (face.boundingBox.bottom * scale) + offsetY,
-      );
-
-      // Draw shadow
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(rect, Radius.circular(12)),
-        shadowPaint,
-      );
-
-      // Draw main frame
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(rect, Radius.circular(12)),
-        paint,
-      );
-
-      // Draw corner indicators
-      final cornerSize = 20.0 * animation.value;
-      final cornerPaint = Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 4.0
-        ..color = frameColor;
-
-      // Draw corners (sama seperti sebelumnya)
-      // Top-left corner
-      canvas.drawPath(
-        Path()
-          ..moveTo(rect.left, rect.top + cornerSize)
-          ..lineTo(rect.left, rect.top + 12)
-          ..quadraticBezierTo(rect.left, rect.top, rect.left + 12, rect.top)
-          ..lineTo(rect.left + cornerSize, rect.top),
-        cornerPaint,
-      );
-
-      // Top-right corner
-      canvas.drawPath(
-        Path()
-          ..moveTo(rect.right - cornerSize, rect.top)
-          ..lineTo(rect.right - 12, rect.top)
-          ..quadraticBezierTo(rect.right, rect.top, rect.right, rect.top + 12)
-          ..lineTo(rect.right, rect.top + cornerSize),
-        cornerPaint,
-      );
-
-      // Bottom-left corner
-      canvas.drawPath(
-        Path()
-          ..moveTo(rect.left, rect.bottom - cornerSize)
-          ..lineTo(rect.left, rect.bottom - 12)
-          ..quadraticBezierTo(rect.left, rect.bottom, rect.left + 12, rect.bottom)
-          ..lineTo(rect.left + cornerSize, rect.bottom),
-        cornerPaint,
-      );
-
-      // Bottom-right corner
-      canvas.drawPath(
-        Path()
-          ..moveTo(rect.right - cornerSize, rect.bottom)
-          ..lineTo(rect.right - 12, rect.bottom)
-          ..quadraticBezierTo(rect.right, rect.bottom, rect.right, rect.bottom - 12)
-          ..lineTo(rect.right, rect.bottom - cornerSize),
-        cornerPaint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(ModernFacePainter oldDelegate) =>
-      oldDelegate.faces != faces ||
-          oldDelegate.animation.value != animation.value ||
-          oldDelegate.isLivenessActive != isLivenessActive;
 }

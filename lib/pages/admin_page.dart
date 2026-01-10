@@ -336,36 +336,48 @@ class _AdminPageState extends State<AdminPage> {
                                   ),
                                 ),
                                 SizedBox(height: 4),
-                                Row(
+                                Wrap(
+                                  spacing: 10,
+                                  runSpacing: 4,
+                                  crossAxisAlignment: WrapCrossAlignment.center,
                                   children: [
-                                    Icon(
-                                      Icons.login,
-                                      size: 12,
-                                      color: Colors.grey.shade600,
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.login,
+                                          size: 12,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                        SizedBox(width: 4),
+                                        Text(
+                                          "Masuk: ${item.checkInLabel}",
+                                          style: TextStyle(
+                                            color: Colors.grey.shade600,
+                                            fontSize: 12,
+                                            fontFamily: 'Poppins',
+                                          ),
+                                        ),
+                                      ],
                                     ),
-                                    SizedBox(width: 4),
-                                    Text(
-                                      "Masuk: ${item.checkInLabel}",
-                                      style: TextStyle(
-                                        color: Colors.grey.shade600,
-                                        fontSize: 12,
-                                        fontFamily: 'Poppins',
-                                      ),
-                                    ),
-                                    SizedBox(width: 10),
-                                    Icon(
-                                      Icons.logout,
-                                      size: 12,
-                                      color: Colors.grey.shade600,
-                                    ),
-                                    SizedBox(width: 4),
-                                    Text(
-                                      "Pulang: ${item.checkOutLabel}",
-                                      style: TextStyle(
-                                        color: Colors.grey.shade600,
-                                        fontSize: 12,
-                                        fontFamily: 'Poppins',
-                                      ),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.logout,
+                                          size: 12,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                        SizedBox(width: 4),
+                                        Text(
+                                          "Pulang: ${item.checkOutLabel}",
+                                          style: TextStyle(
+                                            color: Colors.grey.shade600,
+                                            fontSize: 12,
+                                            fontFamily: 'Poppins',
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ],
                                 ),

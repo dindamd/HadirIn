@@ -40,9 +40,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   bool _isLivenessCheckActive = false;
   int _blinkCount = 0;
   final int _requiredBlinks = 2;
-  final double _eyeOpenThreshold = 0.45;
-  final double _eyeClosedThreshold = 0.35;
-  final int _baselineTargetSamples = 4;
+  final double _eyeOpenThreshold = 0.38;
+  final double _eyeClosedThreshold = 0.32;
+  final int _baselineTargetSamples = 3;
   final int _minClosedFrames = 1;
   final Duration _blinkDebounce = Duration(milliseconds: 220);
   bool _eyesCurrentlyOpen = true;
@@ -146,10 +146,13 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   bool _detectBlink(Face face) {
     final leftEye = face.leftEyeOpenProbability;
     final rightEye = face.rightEyeOpenProbability;
+    final availableEyes = <double>[];
+    if (leftEye != null) availableEyes.add(leftEye);
+    if (rightEye != null) availableEyes.add(rightEye);
+    if (availableEyes.isEmpty) return false;
 
-    if (leftEye == null || rightEye == null) return false;
-
-    final avgEyeOpenness = (leftEye + rightEye) / 2;
+    final avgEyeOpenness =
+        availableEyes.reduce((a, b) => a + b) / availableEyes.length;
 
     _eyeOpennesHistory.add(avgEyeOpenness);
     if (_eyeOpennesHistory.length > _maxHistorySize) {
@@ -170,10 +173,10 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     }
 
     final double openThreshold = _eyeBaseline != null
-        ? (_eyeBaseline! * 0.7).clamp(0.4, 0.8).toDouble()
+        ? (_eyeBaseline! * 0.75).clamp(0.28, 0.85).toDouble()
         : _eyeOpenThreshold;
     final double closedThreshold = _eyeBaseline != null
-        ? (_eyeBaseline! * 0.5).clamp(0.25, 0.6).toDouble()
+        ? (_eyeBaseline! * 0.6).clamp(0.22, 0.7).toDouble()
         : _eyeClosedThreshold;
 
     if (smoothed < closedThreshold) {

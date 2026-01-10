@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
+import '../models/attendance.dart';
+import '../services/api_service.dart';
 import 'admin_login_page.dart';
-import 'attendance_page.dart';
 
 class AdminPage extends StatefulWidget {
   const AdminPage({super.key});
@@ -10,6 +14,27 @@ class AdminPage extends StatefulWidget {
 }
 
 class _AdminPageState extends State<AdminPage> {
+  final ApiService _apiService = ApiService();
+  AttendanceSummary? _summary;
+  bool _loading = true;
+  String? _error;
+  String? _savingName;
+  Timer? _refreshTimer;
+  bool _requestInFlight = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAttendance();
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) {
+        if (_savingName != null || _requestInFlight) return;
+        _loadAttendance(showLoading: false);
+      },
+    );
+  }
+
   void _logout() {
     showDialog(
       context: context,
@@ -70,12 +95,331 @@ class _AdminPageState extends State<AdminPage> {
     );
   }
 
-  int get _onTimeCount => attendanceList.where((item) => item["status"] == "On Time").length;
-  int get _lateCount => attendanceList.where((item) => item["status"] == "Late").length;
-  int get _absentCount => attendanceList.where((item) => item["status"] == "Absent").length;
+  Future<void> _loadAttendance({bool showLoading = true}) async {
+    if (_requestInFlight) return;
+    _requestInFlight = true;
+
+    if (showLoading) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+
+    try {
+      final summary = await _apiService.fetchTodayAttendance();
+      if (!mounted) return;
+      setState(() {
+        _summary = summary;
+        _error = null;
+        if (showLoading) {
+          _loading = false;
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      if (showLoading) {
+        setState(() {
+          _error = e.toString();
+          _loading = false;
+        });
+      }
+    } finally {
+      _requestInFlight = false;
+    }
+  }
+
+  Future<void> _updateAttendance(
+    AttendanceItem item, {
+    required String status,
+    String reason = '',
+    String phase = 'IN',
+  }) async {
+    setState(() {
+      _savingName = item.name;
+    });
+
+    try {
+      await _apiService.updateAttendance(
+        name: item.name,
+        status: status,
+        reason: reason,
+        phase: phase,
+      );
+      await _loadAttendance(showLoading: false);
+      if (!mounted) return;
+      setState(() {
+        _savingName = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString()),
+          backgroundColor: Colors.red.shade600,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+      setState(() {
+        _savingName = null;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final onTimeCount = _summary?.onTime ?? 0;
+    final lateCount = _summary?.late ?? 0;
+    final absentCount = _summary?.absent ?? 0;
+    final items = _summary?.items ?? <AttendanceItem>[];
+
+    Widget listSection;
+    if (_loading) {
+      listSection = Expanded(
+        child: Center(
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(Colors.blue.shade600),
+          ),
+        ),
+      );
+    } else if (_error != null) {
+      listSection = Expanded(
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline, color: Colors.red.shade600, size: 36),
+              SizedBox(height: 12),
+              Text(
+                _error ?? 'Gagal memuat data',
+                style: TextStyle(fontFamily: 'Poppins'),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 12),
+              ElevatedButton(
+                onPressed: _loadAttendance,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue.shade600,
+                  foregroundColor: Colors.white,
+                ),
+                child: Text('Coba lagi'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } else {
+      listSection = Expanded(
+        child: RefreshIndicator(
+          onRefresh: () => _loadAttendance(showLoading: false),
+          child: ListView.builder(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            itemCount: items.length,
+            itemBuilder: (context, index) {
+              final item = items[index];
+              final isSaving = _savingName == item.name;
+              final avatarChar = item.name.isNotEmpty ? item.name[0].toUpperCase() : '?';
+              final statusValue = item.status.isNotEmpty ? item.status : 'On Time';
+
+              return Card(
+                margin: EdgeInsets.only(bottom: 8),
+                elevation: 2,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          Stack(
+                            children: [
+                              CircleAvatar(
+                                radius: 24,
+                                backgroundColor: Colors.blue.shade600,
+                                child: Text(
+                                  avatarChar,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                    fontFamily: 'Poppins',
+                                  ),
+                                ),
+                              ),
+                              Positioned(
+                                right: 0,
+                                bottom: 0,
+                                child: Container(
+                                  width: 12,
+                                  height: 12,
+                                  decoration: BoxDecoration(
+                                    color: _getStatusColor(statusValue),
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: Colors.white,
+                                      width: 2,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          SizedBox(width: 12),
+
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  item.name,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14,
+                                    fontFamily: 'Poppins',
+                                  ),
+                                ),
+                                SizedBox(height: 4),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.access_time,
+                                      size: 12,
+                                      color: Colors.grey.shade600,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Text(
+                                      "Waktu: ${item.time}",
+                                      style: TextStyle(
+                                        color: Colors.grey.shade600,
+                                        fontSize: 12,
+                                        fontFamily: 'Poppins',
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          Container(
+                            padding: EdgeInsets.symmetric(horizontal: 8),
+                            decoration: BoxDecoration(
+                              color: _getStatusColor(statusValue).withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: DropdownButton<String>(
+                              value: statusValue,
+                              underline: SizedBox(),
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: _getStatusColor(statusValue),
+                                fontFamily: 'Poppins',
+                              ),
+                              items: const [
+                                DropdownMenuItem(value: "On Time", child: Text("On Time")),
+                                DropdownMenuItem(value: "Late", child: Text("Late")),
+                                DropdownMenuItem(value: "Absent", child: Text("Absent")),
+                              ],
+                              onChanged: isSaving
+                                  ? null
+                                  : (value) {
+                                      if (value == null) return;
+                                      _updateAttendance(item, status: value, reason: item.reason);
+                                    },
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      if (item.status == "Absent")
+                        Container(
+                          margin: EdgeInsets.only(top: 12),
+                          padding: EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.red.shade50,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.info_outline,
+                                size: 14,
+                                color: Colors.red.shade600,
+                              ),
+                              SizedBox(width: 8),
+                              Text(
+                                "Alasan:",
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.red.shade700,
+                                  fontFamily: 'Poppins',
+                                ),
+                              ),
+                              SizedBox(width: 8),
+                              Expanded(
+                                child: DropdownButton<String>(
+                                  value: item.reason.isEmpty ? null : item.reason,
+                                  hint: Text(
+                                    "Pilih alasan",
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.red.shade400,
+                                      fontFamily: 'Poppins',
+                                    ),
+                                  ),
+                                  isExpanded: true,
+                                  underline: SizedBox(),
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.red.shade700,
+                                    fontFamily: 'Poppins',
+                                  ),
+                                  items: const [
+                                    DropdownMenuItem(value: "Sakit", child: Text("Sakit")),
+                                    DropdownMenuItem(value: "Izin", child: Text("Izin")),
+                                    DropdownMenuItem(value: "Tanpa Keterangan", child: Text("Tanpa Keterangan")),
+                                  ],
+                                  onChanged: isSaving
+                                      ? null
+                                      : (value) {
+                                          _updateAttendance(
+                                            item,
+                                            status: "Absent",
+                                            reason: value ?? '',
+                                          );
+                                        },
+                                ),
+                              ),
+                              if (isSaving)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 8.0),
+                                  child: SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      valueColor: AlwaysStoppedAnimation<Color>(Colors.red.shade600),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
@@ -132,15 +476,15 @@ class _AdminPageState extends State<AdminPage> {
                 SizedBox(height: 8),
                 Text(
                   "Kelola data kehadiran karyawan",
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.9),
-                    fontSize: 14,
-                    fontFamily: 'Poppins',
-                  ),
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.9),
+                      fontSize: 14,
+                      fontFamily: 'Poppins',
+                    ),
                 ),
-              ],
-            ),
+            ],
           ),
+        ),
 
           // Statistics Cards
           Container(
@@ -150,7 +494,7 @@ class _AdminPageState extends State<AdminPage> {
                 Expanded(
                   child: _buildStatCard(
                     "Tepat Waktu",
-                    _onTimeCount.toString(),
+                    onTimeCount.toString(),
                     Colors.green,
                     Icons.check_circle,
                   ),
@@ -159,7 +503,7 @@ class _AdminPageState extends State<AdminPage> {
                 Expanded(
                   child: _buildStatCard(
                     "Terlambat",
-                    _lateCount.toString(),
+                    lateCount.toString(),
                     Colors.orange,
                     Icons.schedule,
                   ),
@@ -168,7 +512,7 @@ class _AdminPageState extends State<AdminPage> {
                 Expanded(
                   child: _buildStatCard(
                     "Tidak Hadir",
-                    _absentCount.toString(),
+                    absentCount.toString(),
                     Colors.red,
                     Icons.cancel,
                   ),
@@ -205,7 +549,7 @@ class _AdminPageState extends State<AdminPage> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Text(
-                    "${attendanceList.length} orang",
+                    "${items.length} orang",
                     style: TextStyle(
                       fontSize: 12,
                       color: Colors.blue.shade700,
@@ -217,207 +561,17 @@ class _AdminPageState extends State<AdminPage> {
             ),
           ),
 
-          // Employee List
-          Expanded(
-            child: ListView.builder(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              itemCount: attendanceList.length,
-              itemBuilder: (context, index) {
-                final item = attendanceList[index];
-                return Card(
-                  margin: EdgeInsets.only(bottom: 8),
-                  elevation: 2,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Column(
-                      children: [
-                        Row(
-                          children: [
-                            // Avatar with status
-                            Stack(
-                              children: [
-                                CircleAvatar(
-                                  radius: 24,
-                                  backgroundColor: Colors.blue.shade600,
-                                  child: Text(
-                                    item["name"]![0].toUpperCase(),
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w600,
-                                      fontFamily: 'Poppins',
-                                    ),
-                                  ),
-                                ),
-                                Positioned(
-                                  right: 0,
-                                  bottom: 0,
-                                  child: Container(
-                                    width: 12,
-                                    height: 12,
-                                    decoration: BoxDecoration(
-                                      color: _getStatusColor(item["status"]!),
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color: Colors.white,
-                                        width: 2,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-
-                            SizedBox(width: 12),
-
-                            // Employee info
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    item["name"]!,
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 14,
-                                      fontFamily: 'Poppins',
-                                    ),
-                                  ),
-                                  SizedBox(height: 4),
-                                  Row(
-                                    children: [
-                                      Icon(
-                                        Icons.access_time,
-                                        size: 12,
-                                        color: Colors.grey.shade600,
-                                      ),
-                                      SizedBox(width: 4),
-                                      Text(
-                                        "Waktu: ${item["time"]}",
-                                        style: TextStyle(
-                                          color: Colors.grey.shade600,
-                                          fontSize: 12,
-                                          fontFamily: 'Poppins',
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-
-                            // Status dropdown
-                            Container(
-                              padding: EdgeInsets.symmetric(horizontal: 8),
-                              decoration: BoxDecoration(
-                                color: _getStatusColor(item["status"]!).withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: DropdownButton<String>(
-                                value: item["status"],
-                                underline: SizedBox(),
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: _getStatusColor(item["status"]!),
-                                  fontFamily: 'Poppins',
-                                ),
-                                items: const [
-                                  DropdownMenuItem(value: "On Time", child: Text("On Time")),
-                                  DropdownMenuItem(value: "Late", child: Text("Late")),
-                                  DropdownMenuItem(value: "Absent", child: Text("Absent")),
-                                ],
-                                onChanged: (value) {
-                                  setState(() {
-                                    item["status"] = value ?? "Absent";
-
-                                    if (value == "Absent") {
-                                      item["time"] = "-";
-                                    } else {
-                                      if (item["time"] == "-") {
-                                        item["time"] = "08:00";
-                                      }
-                                    }
-
-                                    if (value != "Absent") item["reason"] = "";
-                                  });
-                                },
-                              ),
-                            ),
-                          ],
-                        ),
-
-                        // Absent reason
-                        if (item["status"] == "Absent")
-                          Container(
-                            margin: EdgeInsets.only(top: 12),
-                            padding: EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: Colors.red.shade50,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Row(
-                              children: [
-                                Icon(
-                                  Icons.info_outline,
-                                  size: 14,
-                                  color: Colors.red.shade600,
-                                ),
-                                SizedBox(width: 8),
-                                Text(
-                                  "Alasan:",
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.red.shade700,
-                                    fontFamily: 'Poppins',
-                                  ),
-                                ),
-                                SizedBox(width: 8),
-                                Expanded(
-                                  child: DropdownButton<String>(
-                                    value: item["reason"]!.isEmpty ? null : item["reason"],
-                                    hint: Text(
-                                      "Pilih alasan",
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: Colors.red.shade400,
-                                        fontFamily: 'Poppins',
-                                      ),
-                                    ),
-                                    isExpanded: true,
-                                    underline: SizedBox(),
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.red.shade700,
-                                      fontFamily: 'Poppins',
-                                    ),
-                                    items: const [
-                                      DropdownMenuItem(value: "Sakit", child: Text("Sakit")),
-                                      DropdownMenuItem(value: "Izin", child: Text("Izin")),
-                                      DropdownMenuItem(value: "Tanpa Keterangan", child: Text("Tanpa Keterangan")),
-                                    ],
-                                    onChanged: (value) {
-                                      setState(() {
-                                        item["reason"] = value ?? "";
-                                      });
-                                    },
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
+          listSection,
         ],
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    _apiService.dispose();
+    super.dispose();
   }
 
   Widget _buildStatCard(String title, String count, Color color, IconData icon) {
@@ -428,7 +582,7 @@ class _AdminPageState extends State<AdminPage> {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 6,
             offset: Offset(0, 2),
           ),

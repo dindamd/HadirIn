@@ -55,7 +55,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
     // Start animations
     _fadeController.forward();
     Future.delayed(const Duration(milliseconds: 200), () {
-      _slideController.forward();
+      if (mounted) _slideController.forward();
     });
   }
 
@@ -76,6 +76,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
 
       // Simulate network delay
       await Future.delayed(const Duration(milliseconds: 1500));
+      if (!mounted) return;
 
       final username = _usernameController.text;
       final password = _passwordController.text;
@@ -95,6 +96,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
           _isLoading = false;
         });
 
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Row(
@@ -139,7 +141,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Colors.blue.shade400.withOpacity(0.1),
+                  Colors.blue.shade400.withValues(alpha: 0.1),
                   Colors.white,
                   Colors.blue.shade50,
                 ],
@@ -160,7 +162,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                   shape: BoxShape.circle,
                   gradient: RadialGradient(
                     colors: [
-                      Colors.blue.shade200.withOpacity(0.3),
+                      Colors.blue.shade200.withValues(alpha: 0.3),
                       Colors.transparent,
                     ],
                   ),
@@ -181,7 +183,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                   shape: BoxShape.circle,
                   gradient: RadialGradient(
                     colors: [
-                      Colors.purple.shade200.withOpacity(0.2),
+                      Colors.purple.shade200.withValues(alpha: 0.2),
                       Colors.transparent,
                     ],
                   ),
@@ -226,7 +228,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                                       shape: BoxShape.circle,
                                       boxShadow: [
                                         BoxShadow(
-                                          color: Colors.blue.withOpacity(0.3),
+                                          color: Colors.blue.withValues(alpha: 0.3),
                                           blurRadius: 20,
                                           offset: Offset(0, 10),
                                         ),
@@ -276,11 +278,11 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                                   color: Colors.white,
                                   borderRadius: BorderRadius.circular(24),
                                   boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withOpacity(0.1),
-                                      blurRadius: 20,
-                                      offset: Offset(0, 10),
-                                    ),
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.1),
+                    blurRadius: 20,
+                    offset: Offset(0, 10),
+                  ),
                                   ],
                                 ),
                                 child: Form(

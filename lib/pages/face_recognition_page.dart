@@ -1,10 +1,12 @@
-import 'package:flutter/material.dart';
+﻿import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:camera/camera.dart';
+import 'package:flutter/material.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+
 import '../services/api_service.dart';
 import 'admin_login_page.dart';
-import 'attendance_page.dart';
-import 'dart:typed_data';
 
 class FaceRecognitionPage extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -26,33 +28,51 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   final ApiService _apiService = ApiService();
 
   bool _isDetecting = false;
+  bool _isVerifying = false;
+  bool _pendingVerification = false;
   int _selectedCameraIndex = 0;
   List<Face> _faces = [];
   String attendanceStatus = "Belum";
   String statusMessage = "Posisikan wajah Anda dalam frame";
+  DateTime? _lastFaceSeenAt;
 
   // Blink detection variables
   bool _isLivenessCheckActive = false;
-  bool _hasDetectedBlink = false;
   int _blinkCount = 0;
-  int _requiredBlinks = 2;
-  double _eyeOpenThreshold = 0.4;
-  List<double> _eyeOpennesHistory = [];
-  int _maxHistorySize = 10;
+  final int _requiredBlinks = 2;
+  final double _eyeOpenThreshold = 0.45;
+  final double _eyeClosedThreshold = 0.35;
+  final int _baselineTargetSamples = 4;
+  final int _minClosedFrames = 1;
+  final Duration _blinkDebounce = Duration(milliseconds: 220);
+  bool _eyesCurrentlyOpen = true;
+  DateTime? _lastBlinkAt;
+  double? _eyeBaseline;
+  int _baselineSamples = 0;
+  int _closedFrames = 0;
+  final List<double> _eyeOpennesHistory = [];
+  final int _maxHistorySize = 4;
   bool _canProceedWithVerification = false;
+  DateTime? _lastVerificationAt;
 
   @override
   void initState() {
     super.initState();
+    _selectedCameraIndex = widget.cameras.indexWhere(
+      (camera) => camera.lensDirection == CameraLensDirection.front,
+    );
+    if (_selectedCameraIndex < 0) {
+      _selectedCameraIndex = 0;
+    }
     _faceDetector = FaceDetector(
       options: FaceDetectorOptions(
-        enableContours: true,
+        enableContours: false,
         enableClassification: true, // Enable untuk blink detection
-        performanceMode: FaceDetectorMode.accurate, // Lebih akurat
+        performanceMode: FaceDetectorMode.fast, // Lebih responsif di device asli
+        enableTracking: true,
       ),
     );
 
-    // Setup animations
     _pulseController = AnimationController(
       duration: const Duration(seconds: 2),
       vsync: this,
@@ -85,70 +105,96 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   Future<void> _initCamera() async {
     _controller = CameraController(
       widget.cameras[_selectedCameraIndex],
-      ResolutionPreset.high,
+      ResolutionPreset.medium,
       enableAudio: false,
     );
 
-    await _controller.initialize();
-    if (!mounted) return;
-    setState(() {});
-    _startDetection();
+    try {
+      await _controller.initialize();
+      if (!mounted) return;
+      setState(() {});
+      await _startDetection();
+    } catch (e) {
+      debugPrint('Error init camera: $e');
+    }
   }
 
   void _flipCamera() async {
     _selectedCameraIndex = (_selectedCameraIndex + 1) % widget.cameras.length;
+    await _stopDetectionStream();
     await _controller.dispose();
     _resetBlinkDetection();
     _initCamera();
   }
 
   void _resetBlinkDetection() {
+    _pendingVerification = false;
     setState(() {
       _isLivenessCheckActive = false;
-      _hasDetectedBlink = false;
       _blinkCount = 0;
+      _eyesCurrentlyOpen = true;
+      _lastBlinkAt = null;
+      _eyeBaseline = null;
+      _baselineSamples = 0;
+      _closedFrames = 0;
       _eyeOpennesHistory.clear();
       _canProceedWithVerification = false;
       statusMessage = "Posisikan wajah Anda dalam frame";
     });
   }
 
-  String getAttendanceStatus(DateTime now) {
-    final hour = now.hour;
-    final minute = now.minute;
-
-    if (hour >= 8 && (hour < 10 || (hour == 10 && minute == 0))) {
-      return "On Time";
-    } else {
-      return "Late";
-    }
-  }
-
   bool _detectBlink(Face face) {
-    // Cek apakah mata kiri dan kanan terdeteksi
     final leftEye = face.leftEyeOpenProbability;
     final rightEye = face.rightEyeOpenProbability;
 
     if (leftEye == null || rightEye == null) return false;
 
-    // Rata-rata probabilitas mata terbuka
     final avgEyeOpenness = (leftEye + rightEye) / 2;
 
-    // Tambahkan ke history
     _eyeOpennesHistory.add(avgEyeOpenness);
     if (_eyeOpennesHistory.length > _maxHistorySize) {
       _eyeOpennesHistory.removeAt(0);
     }
 
-    // Deteksi kedipan berdasarkan perubahan dari terbuka ke tertutup ke terbuka
-    if (_eyeOpennesHistory.length >= 3) {
-      final recent = _eyeOpennesHistory.sublist(_eyeOpennesHistory.length - 3);
+    final smoothed = _eyeOpennesHistory.reduce((a, b) => a + b) /
+        _eyeOpennesHistory.length;
 
-      // Pola: mata terbuka -> tertutup -> terbuka
-      if (recent[0] > _eyeOpenThreshold && // Mata terbuka
-          recent[1] < _eyeOpenThreshold && // Mata tertutup (kedip)
-          recent[2] > _eyeOpenThreshold) { // Mata terbuka lagi
-        return true;
+    if (_isLivenessCheckActive && _eyeBaseline == null) {
+      if (smoothed >= _eyeOpenThreshold) {
+        _baselineSamples += 1;
+        _eyeBaseline = (_eyeBaseline ?? 0) + smoothed;
+        if (_baselineSamples >= _baselineTargetSamples) {
+          _eyeBaseline = _eyeBaseline! / _baselineSamples;
+        }
+      }
+    }
+
+    final double openThreshold = _eyeBaseline != null
+        ? (_eyeBaseline! * 0.7).clamp(0.4, 0.8).toDouble()
+        : _eyeOpenThreshold;
+    final double closedThreshold = _eyeBaseline != null
+        ? (_eyeBaseline! * 0.5).clamp(0.25, 0.6).toDouble()
+        : _eyeClosedThreshold;
+
+    if (smoothed < closedThreshold) {
+      _closedFrames += 1;
+      _eyesCurrentlyOpen = false;
+      return false;
+    }
+
+    if (smoothed > openThreshold) {
+      if (!_eyesCurrentlyOpen && _closedFrames >= _minClosedFrames) {
+        _eyesCurrentlyOpen = true;
+        _closedFrames = 0;
+        final now = DateTime.now();
+        if (_lastBlinkAt == null ||
+            now.difference(_lastBlinkAt!) > _blinkDebounce) {
+          _lastBlinkAt = now;
+          return true;
+        }
+      } else {
+        _closedFrames = 0;
+        _eyesCurrentlyOpen = true;
       }
     }
 
@@ -162,126 +208,182 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     });
   }
 
-  void _startDetection() {
-    _controller.startImageStream((CameraImage image) async {
-      if (_isDetecting) return;
-      _isDetecting = true;
+  Future<void> _startDetection() async {
+    if (!_controller.value.isInitialized || _controller.value.isStreamingImages) {
+      return;
+    }
 
-      try {
-        final bytes = image.planes.fold<Uint8List>(
-          Uint8List(0),
-              (previous, plane) => Uint8List.fromList(previous + plane.bytes),
-        );
+    try {
+      await _controller.startImageStream((CameraImage image) async {
+        if (_isDetecting || _isVerifying) return;
+        _isDetecting = true;
 
-        final Size imageSize =
-        Size(image.width.toDouble(), image.height.toDouble());
+        try {
+          final bytes = image.planes.fold<Uint8List>(
+            Uint8List(0),
+            (previous, plane) => Uint8List.fromList(previous + plane.bytes),
+          );
 
-        final rotation = InputImageRotationValue.fromRawValue(
-          widget.cameras[_selectedCameraIndex].sensorOrientation,
-        ) ??
-            InputImageRotation.rotation0deg;
+          final Size imageSize =
+              Size(image.width.toDouble(), image.height.toDouble());
 
-        const format = InputImageFormat.nv21;
-        final plane = image.planes.first;
+          final rotation = InputImageRotationValue.fromRawValue(
+                widget.cameras[_selectedCameraIndex].sensorOrientation,
+              ) ??
+              InputImageRotation.rotation0deg;
 
-        final inputImage = InputImage.fromBytes(
-          bytes: bytes,
-          metadata: InputImageMetadata(
-            size: imageSize,
-            rotation: rotation,
-            format: format,
-            bytesPerRow: plane.bytesPerRow,
-          ),
-        );
+          const format = InputImageFormat.nv21;
+          final plane = image.planes.first;
 
-        final faces = await _faceDetector.processImage(inputImage);
+          final inputImage = InputImage.fromBytes(
+            bytes: bytes,
+            metadata: InputImageMetadata(
+              size: imageSize,
+              rotation: rotation,
+              format: format,
+              bytesPerRow: plane.bytesPerRow,
+            ),
+          );
 
-        if (mounted) {
-          setState(() {
-            _faces = faces;
-          });
+          final faces = await _faceDetector.processImage(inputImage);
 
-          if (faces.isNotEmpty) {
-            final face = faces.first;
+          if (mounted) {
+            setState(() {
+              _faces = faces;
+            });
 
-            if (!_isLivenessCheckActive && !_canProceedWithVerification) {
-              // Mulai liveness check
-              _startLivenessCheck();
-            } else if (_isLivenessCheckActive && !_canProceedWithVerification) {
-              // Proses blink detection
-              if (_detectBlink(face)) {
-                _blinkCount++;
-                setState(() {
-                  if (_blinkCount >= _requiredBlinks) {
-                    _canProceedWithVerification = true;
-                    _isLivenessCheckActive = false;
-                    statusMessage = "Verifikasi liveness berhasil! Memverifikasi wajah...";
-                  } else {
-                    statusMessage = "Berkedip lagi (${_requiredBlinks - _blinkCount} kali lagi)";
-                  }
-                });
-              }
-            } else if (_canProceedWithVerification) {
-              // Lakukan verifikasi wajah setelah liveness check berhasil
-              final result = await _apiService.verifyFace(true);
-              if (mounted && result["success"]) {
-                final now = DateTime.now();
-                final formattedTime =
-                    "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}";
+            if (faces.isNotEmpty) {
+              _lastFaceSeenAt = DateTime.now();
+              final face = faces.first;
 
-                final status = getAttendanceStatus(now);
-
-                setState(() {
-                  attendanceStatus = "Berhasil";
-                  statusMessage = "Absensi berhasil: ${result["name"]} ($formattedTime)";
-                });
-
-                // Trigger success animation
-                _successController.forward().then((_) {
-                  Future.delayed(Duration(milliseconds: 500), () {
-                    _successController.reverse();
+              if (!_isLivenessCheckActive && !_canProceedWithVerification) {
+                _startLivenessCheck();
+              } else if (_isLivenessCheckActive && !_canProceedWithVerification) {
+                if (_detectBlink(face)) {
+                  _blinkCount++;
+                  setState(() {
+                    if (_blinkCount >= _requiredBlinks) {
+                      _canProceedWithVerification = true;
+                      _isLivenessCheckActive = false;
+                      statusMessage = "Verifikasi liveness berhasil! Memverifikasi wajah...";
+                    } else {
+                      statusMessage =
+                          "Berkedip lagi (${_requiredBlinks - _blinkCount} kali lagi)";
+                    }
                   });
-                });
-
-                // Update attendance list
-                final existingIndex = attendanceList.indexWhere(
-                        (item) => item["name"] == result["name"]);
-
-                if (existingIndex != -1) {
-                  if (attendanceList[existingIndex]["time"] == "-") {
-                    attendanceList[existingIndex]["time"] = formattedTime;
-                    attendanceList[existingIndex]["status"] = status;
-                  }
                 }
-
-                // Reset untuk scan berikutnya
-                Future.delayed(Duration(seconds: 3), () {
-                  _resetBlinkDetection();
-                });
+              } else if (_canProceedWithVerification &&
+                  !_pendingVerification &&
+                  !_isVerifying) {
+                _pendingVerification = true;
+                _isDetecting = false;
+                await _captureAndVerify();
+                return;
               }
-            }
-          } else {
-            // Tidak ada wajah terdeteksi
-            if (!_canProceedWithVerification) {
-              setState(() {
-                statusMessage = "Posisikan wajah Anda dalam frame";
-              });
-              _resetBlinkDetection();
+            } else {
+              if (!_canProceedWithVerification && !_isVerifying) {
+                final now = DateTime.now();
+                final lastSeen = _lastFaceSeenAt;
+                final shouldReset = lastSeen == null ||
+                    now.difference(lastSeen) > const Duration(milliseconds: 900);
+                if (shouldReset) {
+                  setState(() {
+                    statusMessage = "Posisikan wajah Anda dalam frame";
+                  });
+                  _resetBlinkDetection();
+                }
+              }
             }
           }
+        } catch (e) {
+          debugPrint("Error face detection: $e");
         }
 
-        debugPrint("👤 Detected faces: ${faces.length}");
-      } catch (e) {
-        debugPrint("❌ Error face detection: $e");
-      }
+        _isDetecting = false;
+      });
+    } catch (e) {
+      debugPrint('Gagal memulai stream kamera: $e');
+    }
+  }
 
-      _isDetecting = false;
+  Future<void> _stopDetectionStream() async {
+    if (_controller.value.isStreamingImages) {
+      try {
+        await _controller.stopImageStream();
+      } catch (e) {
+        debugPrint('Gagal menghentikan stream: $e');
+      }
+    }
+    _isDetecting = false;
+  }
+
+  Future<void> _captureAndVerify() async {
+    if (!_controller.value.isInitialized) return;
+
+    setState(() {
+      _isVerifying = true;
+      attendanceStatus = "Memproses";
+      statusMessage = "Mengambil gambar untuk verifikasi...";
     });
+
+    await _stopDetectionStream();
+
+    try {
+      final picture = await _controller.takePicture();
+      if (!mounted) return;
+
+      setState(() {
+        statusMessage = "Mengirim ke server absensi...";
+      });
+
+      final result = await _apiService.verifyFace(picture);
+      if (!mounted) return;
+
+      if (result.success) {
+        setState(() {
+          attendanceStatus = "Berhasil";
+          final name = result.name ?? 'Karyawan';
+          final time = result.time != null && result.time!.isNotEmpty
+              ? ' (${result.time})'
+              : '';
+          statusMessage = "Absensi $name$time";
+        });
+
+        _successController.forward().then((_) {
+          Future.delayed(const Duration(milliseconds: 500), () {
+            if (mounted) _successController.reverse();
+          });
+        });
+      } else {
+        setState(() {
+          attendanceStatus = "Gagal";
+          statusMessage = result.message;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          attendanceStatus = "Gagal";
+          statusMessage = "Gagal verifikasi: $e";
+        });
+      }
+    } finally {
+      if (mounted) {
+        _pendingVerification = false;
+        _isVerifying = false;
+        _lastVerificationAt = DateTime.now();
+        await Future.delayed(const Duration(seconds: 3));
+        attendanceStatus = "Belum";
+        _resetBlinkDetection();
+        await Future.delayed(const Duration(milliseconds: 300));
+        await _startDetection();
+      }
+    }
   }
 
   @override
   void dispose() {
+    _stopDetectionStream();
     _controller.dispose();
     _faceDetector.close();
     _pulseController.dispose();
@@ -298,7 +400,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Container(
+              SizedBox(
                 width: 80,
                 height: 80,
                 child: CircularProgressIndicator(
@@ -320,6 +422,28 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
         ),
       );
     }
+
+    final previewSize = _controller.value.previewSize;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final displayWidth = screenWidth - 32;
+    final aspect = previewSize == null
+        ? 0.75
+        : (previewSize.width > previewSize.height)
+            ? previewSize.height / previewSize.width
+            : previewSize.width / previewSize.height;
+    final displayHeight = displayWidth / aspect;
+    final painterSize = Size(
+      previewSize == null
+          ? 1
+          : (previewSize.width > previewSize.height
+              ? previewSize.height
+              : previewSize.width),
+      previewSize == null
+          ? 1
+          : (previewSize.width > previewSize.height
+              ? previewSize.width
+              : previewSize.height),
+    );
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -370,17 +494,16 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       ),
       body: Stack(
         children: [
-          // Camera Preview with proper sizing
           Center(
             child: Container(
               margin: EdgeInsets.only(top: 120, bottom: 180),
-              width: MediaQuery.of(context).size.width - 32,
-              height: (MediaQuery.of(context).size.width - 32) * 4/3,
+              width: displayWidth,
+              height: displayHeight,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(24),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.blue.withOpacity(0.3),
+                    color: Colors.blue.withValues(alpha: 0.3),
                     blurRadius: 20,
                     spreadRadius: 2,
                   ),
@@ -388,36 +511,25 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(24),
-                child: OverflowBox(
-                  alignment: Alignment.center,
-                  child: FittedBox(
-                    fit: BoxFit.cover,
-                    child: SizedBox(
-                      width: MediaQuery.of(context).size.width - 32,
-                      height: (MediaQuery.of(context).size.width - 32) * 4/3,
-                      child: CameraPreview(_controller),
-                    ),
-                  ),
+                child: AspectRatio(
+                  aspectRatio: aspect,
+                  child: CameraPreview(_controller),
                 ),
               ),
             ),
           ),
 
-          // Face detection overlay
           Center(
             child: Container(
               margin: EdgeInsets.only(top: 120, bottom: 180),
-              width: MediaQuery.of(context).size.width - 32,
-              height: (MediaQuery.of(context).size.width - 32) * 4/3,
+              width: displayWidth,
+              height: displayHeight,
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(24),
                 child: CustomPaint(
                   painter: ModernFacePainter(
                     faces: _faces,
-                    imageSize: Size(
-                      _controller.value.previewSize!.height,
-                      _controller.value.previewSize!.width,
-                    ),
+                    imageSize: painterSize,
                     animation: _pulseAnimation,
                     isLivenessActive: _isLivenessCheckActive,
                   ),
@@ -426,7 +538,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             ),
           ),
 
-          // Status card
           Positioned(
             top: 140,
             left: 24,
@@ -434,27 +545,42 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             child: AnimatedBuilder(
               animation: _successController,
               builder: (context, child) {
+                Color startColor;
+                Color endColor;
+                if (attendanceStatus == "Berhasil") {
+                  startColor = Colors.green.shade400;
+                  endColor = Colors.green.shade600;
+                } else if (attendanceStatus == "Gagal") {
+                  startColor = Colors.red.shade400;
+                  endColor = Colors.red.shade600;
+                } else if (_isLivenessCheckActive) {
+                  startColor = Colors.orange.shade400;
+                  endColor = Colors.orange.shade600;
+                } else {
+                  startColor = Colors.blue.shade400;
+                  endColor = Colors.blue.shade600;
+                }
+
+                final shadowColor = attendanceStatus == "Berhasil"
+                    ? Colors.green
+                    : attendanceStatus == "Gagal"
+                        ? Colors.red
+                        : _isLivenessCheckActive
+                            ? Colors.orange
+                            : Colors.blue;
+
                 return Transform.scale(
                   scale: 1.0 + (_successAnimation.value * 0.1),
                   child: Container(
                     padding: EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
-                        colors: attendanceStatus == "Berhasil"
-                            ? [Colors.green.shade400, Colors.green.shade600]
-                            : _isLivenessCheckActive
-                            ? [Colors.orange.shade400, Colors.orange.shade600]
-                            : [Colors.blue.shade400, Colors.blue.shade600],
+                        colors: [startColor, endColor],
                       ),
                       borderRadius: BorderRadius.circular(20),
                       boxShadow: [
                         BoxShadow(
-                          color: (attendanceStatus == "Berhasil"
-                              ? Colors.green
-                              : _isLivenessCheckActive
-                              ? Colors.orange
-                              : Colors.blue)
-                              .withOpacity(0.3),
+                          color: shadowColor.withValues(alpha: 0.3),
                           blurRadius: 12,
                           offset: Offset(0, 4),
                         ),
@@ -482,6 +608,16 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                             ),
                           ),
                         ),
+                        if (_isVerifying)
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -490,7 +626,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             ),
           ),
 
-          // Blink counter
           if (_isLivenessCheckActive)
             Positioned(
               top: 210,
@@ -498,7 +633,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
               child: Container(
                 padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 decoration: BoxDecoration(
-                  color: Colors.orange.withOpacity(0.9),
+                  color: Colors.orange.withValues(alpha: 0.9),
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: Row(
@@ -524,14 +659,13 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
               ),
             ),
 
-          // Face count indicator
           Positioned(
             top: 210,
             left: _isLivenessCheckActive ? 180 : 24,
             child: Container(
               padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.7),
+                color: Colors.black.withValues(alpha: 0.7),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(
                   color: _faces.isNotEmpty ? Colors.green : Colors.orange,
@@ -561,7 +695,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
             ),
           ),
 
-          // Bottom instruction card
           Positioned(
             bottom: 120,
             left: 24,
@@ -573,7 +706,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                 borderRadius: BorderRadius.circular(20),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.1),
+                    color: Colors.black.withValues(alpha: 0.1),
                     blurRadius: 20,
                     offset: Offset(0, 10),
                   ),
@@ -617,7 +750,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                             Text(
                               _isLivenessCheckActive
                                   ? "Berkedip $_requiredBlinks kali untuk verifikasi anti-foto"
-                                  : "Posisikan wajah dalam frame dan tunggu",
+                                  : _isVerifying
+                                      ? "Sedang memverifikasi wajah ke server..."
+                                      : "Posisikan wajah dalam frame dan tunggu",
                               style: TextStyle(
                                 fontSize: 12,
                                 color: Colors.black54,
@@ -656,7 +791,6 @@ class ModernFacePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (faces.isEmpty) return;
 
-    // Proper scaling calculation
     final double scaleX = size.width / imageSize.width;
     final double scaleY = size.height / imageSize.height;
 
@@ -664,7 +798,6 @@ class ModernFacePainter extends CustomPainter {
     final double offsetX = (size.width - (imageSize.width * scale)) / 2;
     final double offsetY = (size.height - (imageSize.height * scale)) / 2;
 
-    // Warna berbeda untuk liveness check
     final Color frameColor = isLivenessActive
         ? Colors.orange
         : Colors.greenAccent;
@@ -672,12 +805,12 @@ class ModernFacePainter extends CustomPainter {
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3.0 * animation.value
-      ..color = frameColor.withOpacity(0.8);
+      ..color = frameColor.withValues(alpha: 0.8);
 
     final shadowPaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 6.0 * animation.value
-      ..color = frameColor.withOpacity(0.3);
+      ..color = frameColor.withValues(alpha: 0.3);
 
     for (Face face in faces) {
       final rect = Rect.fromLTRB(
@@ -687,27 +820,22 @@ class ModernFacePainter extends CustomPainter {
         (face.boundingBox.bottom * scale) + offsetY,
       );
 
-      // Draw shadow
       canvas.drawRRect(
         RRect.fromRectAndRadius(rect, Radius.circular(12)),
         shadowPaint,
       );
 
-      // Draw main frame
       canvas.drawRRect(
         RRect.fromRectAndRadius(rect, Radius.circular(12)),
         paint,
       );
 
-      // Draw corner indicators
       final cornerSize = 20.0 * animation.value;
       final cornerPaint = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 4.0
         ..color = frameColor;
 
-      // Draw corners (sama seperti sebelumnya)
-      // Top-left corner
       canvas.drawPath(
         Path()
           ..moveTo(rect.left, rect.top + cornerSize)
@@ -717,7 +845,6 @@ class ModernFacePainter extends CustomPainter {
         cornerPaint,
       );
 
-      // Top-right corner
       canvas.drawPath(
         Path()
           ..moveTo(rect.right - cornerSize, rect.top)
@@ -727,7 +854,6 @@ class ModernFacePainter extends CustomPainter {
         cornerPaint,
       );
 
-      // Bottom-left corner
       canvas.drawPath(
         Path()
           ..moveTo(rect.left, rect.bottom - cornerSize)
@@ -737,7 +863,6 @@ class ModernFacePainter extends CustomPainter {
         cornerPaint,
       );
 
-      // Bottom-right corner
       canvas.drawPath(
         Path()
           ..moveTo(rect.right - cornerSize, rect.bottom)
@@ -752,6 +877,6 @@ class ModernFacePainter extends CustomPainter {
   @override
   bool shouldRepaint(ModernFacePainter oldDelegate) =>
       oldDelegate.faces != faces ||
-          oldDelegate.animation.value != animation.value ||
-          oldDelegate.isLivenessActive != isLivenessActive;
+      oldDelegate.animation.value != animation.value ||
+      oldDelegate.isLivenessActive != isLivenessActive;
 }

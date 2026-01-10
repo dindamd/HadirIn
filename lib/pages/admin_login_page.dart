@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/api_service.dart';
 import 'admin_page.dart';
 
 class AdminLoginPage extends StatefulWidget {
@@ -13,6 +14,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
+  final ApiService _apiService = ApiService();
 
   late AnimationController _fadeController;
   late AnimationController _slideController;
@@ -65,6 +67,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
     _slideController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _apiService.dispose();
     super.dispose();
   }
 
@@ -74,14 +77,15 @@ class _AdminLoginPageState extends State<AdminLoginPage>
         _isLoading = true;
       });
 
-      // Simulate network delay
-      await Future.delayed(const Duration(milliseconds: 1500));
-      if (!mounted) return;
-
-      final username = _usernameController.text;
+      final username = _usernameController.text.trim();
       final password = _passwordController.text;
 
-      if (username == "admin" && password == "1234") {
+      try {
+        await _apiService.loginAdmin(
+          identifier: username,
+          password: password,
+        );
+        if (!mounted) return;
         Navigator.pushReplacement(
           context,
           PageRouteBuilder(
@@ -91,19 +95,28 @@ class _AdminLoginPageState extends State<AdminLoginPage>
             },
           ),
         );
-      } else {
+      } catch (e) {
         setState(() {
           _isLoading = false;
         });
 
         if (!mounted) return;
+        final message = e is ApiException
+            ? e.message
+            : "Username atau password salah";
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Row(
               children: [
                 Icon(Icons.error_outline, color: Colors.white),
                 SizedBox(width: 12),
-                Text("Username atau password salah"),
+                Expanded(
+                  child: Text(
+                    message,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
               ],
             ),
             backgroundColor: Colors.red.shade400,
@@ -297,7 +310,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                                           fontSize: 16,
                                         ),
                                         decoration: InputDecoration(
-                                          labelText: "Username",
+                                          labelText: "Username atau Email",
                                           labelStyle: TextStyle(
                                             color: Colors.grey.shade600,
                                             fontFamily: 'Poppins',
@@ -330,7 +343,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                                           fillColor: Colors.grey.shade50,
                                         ),
                                         validator: (value) => value == null || value.isEmpty
-                                            ? "Masukkan username" : null,
+                                            ? "Masukkan username atau email" : null,
                                       ),
 
                                       SizedBox(height: 20),
@@ -458,7 +471,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                         child: Padding(
                           padding: EdgeInsets.only(bottom: 32, top: 20),
                           child: Text(
-                            "Demo: admin / 1234",
+                            "Gunakan akun admin dari website",
                             style: TextStyle(
                               color: Colors.grey.shade500,
                               fontSize: 14,

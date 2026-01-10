@@ -82,9 +82,49 @@ class ApiService {
     }
   }
 
+  Future<void> loginAdmin({
+    required String identifier,
+    required String password,
+  }) async {
+    final payload = {
+      'email': identifier,
+      'password': password,
+    };
+
+    try {
+      final res = await _client
+          .post(
+            _uri('/api/admin/login'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(payload),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      Map<String, dynamic> body = {};
+      if (res.body.isNotEmpty) {
+        try {
+          body = jsonDecode(res.body) as Map<String, dynamic>;
+        } catch (_) {}
+      }
+
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        final message = body['message']?.toString() ??
+            'Login admin gagal (HTTP ${res.statusCode})';
+        throw ApiException(message, statusCode: res.statusCode, body: body);
+      }
+
+      if (body['success'] != true) {
+        throw ApiException(body['message']?.toString() ?? 'Login admin gagal');
+      }
+    } on TimeoutException {
+      throw ApiException('Koneksi timeout saat login admin.');
+    }
+  }
+
   Future<void> updateAttendance({
     required String name,
     required String status,
+    int? employeeId,
     String phase = 'IN',
     String reason = '',
     String? time,
@@ -96,6 +136,7 @@ class ApiService {
       'phase': phase,
       'reason': reason,
       'auto': auto,
+      if (employeeId != null) 'employee_id': employeeId,
       if (time != null && time.isNotEmpty) 'time': time,
     };
 

@@ -134,6 +134,8 @@ class _AdminPageState extends State<AdminPage> {
     required String status,
     String reason = '',
     String phase = 'IN',
+    String? time,
+    bool auto = false,
   }) async {
     setState(() {
       _savingName = item.name;
@@ -143,8 +145,11 @@ class _AdminPageState extends State<AdminPage> {
       await _apiService.updateAttendance(
         name: item.name,
         status: status,
+        employeeId: item.employeeId,
         reason: reason,
         phase: phase,
+        time: time,
+        auto: auto,
       );
       await _loadAttendance(showLoading: false);
       if (!mounted) return;
@@ -165,6 +170,53 @@ class _AdminPageState extends State<AdminPage> {
         _savingName = null;
       });
     }
+  }
+
+  Future<void> _editTime(AttendanceItem item, String phase) async {
+    final baseTime = phase == 'IN' ? item.checkInLabel : item.checkOutLabel;
+    final initial = _parseTimeOfDay(baseTime) ?? TimeOfDay.now();
+
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: initial,
+    );
+
+    if (picked == null) {
+      return;
+    }
+
+    final timeValue = _formatTimeOfDay(picked);
+    await _updateAttendance(
+      item,
+      status: item.status.isEmpty ? 'On Time' : item.status,
+      reason: item.reason,
+      phase: phase,
+      time: timeValue,
+      auto: true,
+    );
+  }
+
+  TimeOfDay? _parseTimeOfDay(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty || trimmed == '-') {
+      return null;
+    }
+    final parts = trimmed.split(':');
+    if (parts.length < 2) {
+      return null;
+    }
+    final hour = int.tryParse(parts[0]);
+    final minute = int.tryParse(parts[1]);
+    if (hour == null || minute == null) {
+      return null;
+    }
+    return TimeOfDay(hour: hour, minute: minute);
+  }
+
+  String _formatTimeOfDay(TimeOfDay value) {
+    final hour = value.hour.toString().padLeft(2, '0');
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
   }
 
   @override
@@ -287,13 +339,28 @@ class _AdminPageState extends State<AdminPage> {
                                 Row(
                                   children: [
                                     Icon(
-                                      Icons.access_time,
+                                      Icons.login,
                                       size: 12,
                                       color: Colors.grey.shade600,
                                     ),
                                     SizedBox(width: 4),
                                     Text(
-                                      "Waktu: ${item.time}",
+                                      "Masuk: ${item.checkInLabel}",
+                                      style: TextStyle(
+                                        color: Colors.grey.shade600,
+                                        fontSize: 12,
+                                        fontFamily: 'Poppins',
+                                      ),
+                                    ),
+                                    SizedBox(width: 10),
+                                    Icon(
+                                      Icons.logout,
+                                      size: 12,
+                                      color: Colors.grey.shade600,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Text(
+                                      "Pulang: ${item.checkOutLabel}",
                                       style: TextStyle(
                                         color: Colors.grey.shade600,
                                         fontSize: 12,
@@ -333,6 +400,54 @@ class _AdminPageState extends State<AdminPage> {
                                     },
                             ),
                           ),
+                        ],
+                      ),
+
+                      SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: [
+                          TextButton.icon(
+                            onPressed: isSaving ? null : () => _editTime(item, 'IN'),
+                            icon: Icon(Icons.login, size: 16),
+                            label: Text("Ubah Masuk"),
+                            style: TextButton.styleFrom(
+                              foregroundColor: Colors.blueGrey.shade700,
+                              backgroundColor: Colors.blueGrey.shade50,
+                              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: isSaving ? null : () => _editTime(item, 'OUT'),
+                            icon: Icon(Icons.logout, size: 16),
+                            label: Text("Ubah Pulang"),
+                            style: TextButton.styleFrom(
+                              foregroundColor: Colors.blueGrey.shade700,
+                              backgroundColor: Colors.blueGrey.shade50,
+                              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                          ),
+                          if (isSaving)
+                            Padding(
+                              padding: EdgeInsets.only(left: 4, top: 6),
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.blueGrey.shade600,
+                                  ),
+                                ),
+                              ),
+                            ),
                         ],
                       ),
 

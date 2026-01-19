@@ -29,11 +29,22 @@ class ApiService {
     return Uri.parse('${ApiConfig.baseUrl}$normalized');
   }
 
+  Uri _faceUri(String path) {
+    final normalized = path.startsWith('/') ? path : '/$path';
+    return Uri.parse('${ApiConfig.faceUrl}$normalized');
+  }
+
+  // ================= FACE SERVICE =================
+
   Future<VerifyResult> verifyFace(XFile image, {String? type}) async {
-    final request = http.MultipartRequest('POST', _uri('/api/face-verify'));
+    final request =
+    http.MultipartRequest('POST', _faceUri('/api/verify-face'));
+
+
     request.files.add(
       await http.MultipartFile.fromPath('image', image.path),
     );
+
     if (type != null && type.isNotEmpty) {
       request.fields['type'] = type;
     }
@@ -52,14 +63,15 @@ class ApiService {
     if (response.body.isNotEmpty) {
       try {
         data = jsonDecode(response.body) as Map<String, dynamic>;
-      } catch (_) {
-        // keep empty map
-      }
+      } catch (_) {}
     }
 
-    final result = VerifyResult.fromApi(data, statusCode: response.statusCode);
+    final result =
+    VerifyResult.fromApi(data, statusCode: response.statusCode);
     return result;
   }
+
+  // ================= LARAVEL API =================
 
   Future<AttendanceSummary> fetchTodayAttendance() async {
     try {
@@ -94,10 +106,10 @@ class ApiService {
     try {
       final res = await _client
           .post(
-            _uri('/api/admin/login'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode(payload),
-          )
+        _uri('/api/admin/login'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      )
           .timeout(const Duration(seconds: 20));
 
       Map<String, dynamic> body = {};
@@ -143,10 +155,10 @@ class ApiService {
     try {
       final res = await _client
           .post(
-            _uri('/api/admin/attendance/update'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode(payload),
-          )
+        _uri('/api/admin/attendance/update'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      )
           .timeout(const Duration(seconds: 20));
 
       if (res.statusCode < 200 || res.statusCode >= 300) {

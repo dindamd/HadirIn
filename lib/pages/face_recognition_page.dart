@@ -32,7 +32,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   bool _isVerifying = false;
   bool _pendingVerification = false;
   DateTime? _lastFrameProcessedAt;
-  final Duration _frameInterval = const Duration(milliseconds: 90);
+  final Duration _frameInterval = const Duration(milliseconds: 60);
   int _selectedCameraIndex = 0;
   List<Face> _faces = [];
   String attendanceStatus = "Belum";

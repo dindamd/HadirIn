@@ -83,6 +83,7 @@ class AttendanceSummary {
     required this.absent,
     required this.leave,
     required this.sick,
+    required this.date,
   });
 
   final List<AttendanceItem> items;
@@ -91,6 +92,7 @@ class AttendanceSummary {
   final int absent;
   final int leave;
   final int sick;
+  final String date;
 
   int get total => items.length;
 
@@ -108,6 +110,7 @@ class AttendanceSummary {
       absent: int.tryParse(counts['absent']?.toString() ?? '0') ?? 0,
       leave: int.tryParse(counts['leave']?.toString() ?? '0') ?? 0,
       sick: int.tryParse(counts['sick']?.toString() ?? '0') ?? 0,
+      date: (json['date'] ?? '').toString(),
     );
   }
 }

@@ -227,6 +227,7 @@ class _AdminPageState extends State<AdminPage> {
     final leaveCount = _summary?.leave ?? 0;
     final sickCount = _summary?.sick ?? 0;
     final items = _summary?.items ?? <AttendanceItem>[];
+    final summaryDate = _summary?.date ?? '';
 
     Widget listSection;
     if (_loading) {
@@ -643,7 +644,9 @@ class _AdminPageState extends State<AdminPage> {
                 ),
                 SizedBox(height: 8),
                 Text(
-                  "Kelola data kehadiran karyawan",
+                  summaryDate.isNotEmpty
+                      ? "Data kehadiran untuk ${summaryDate}"
+                      : "Kelola data kehadiran karyawan",
                     style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.9),
                       fontSize: 14,

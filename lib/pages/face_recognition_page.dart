@@ -32,7 +32,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   bool _isVerifying = false;
   bool _pendingVerification = false;
   DateTime? _lastFrameProcessedAt;
-  final Duration _frameInterval = const Duration(milliseconds: 140);
+  final Duration _frameInterval = const Duration(milliseconds: 90);
   int _selectedCameraIndex = 0;
   List<Face> _faces = [];
   String attendanceStatus = "Belum";
@@ -43,18 +43,20 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   bool _isLivenessCheckActive = false;
   int _blinkCount = 0;
   final int _requiredBlinks = 2;
-  final double _eyeOpenThreshold = 0.38;
-  final double _eyeClosedThreshold = 0.32;
-  final int _baselineTargetSamples = 2;
+  final double _eyeOpenThreshold = 0.35;
+  final double _eyeClosedThreshold = 0.22;
+  final int _baselineTargetSamples = 1;
   final int _minClosedFrames = 0;
-  final Duration _blinkDebounce = Duration(milliseconds: 120);
+  final Duration _blinkDebounce = Duration(milliseconds: 80);
   bool _eyesCurrentlyOpen = true;
   DateTime? _lastBlinkAt;
   double? _eyeBaseline;
   int _baselineSamples = 0;
   int _closedFrames = 0;
   final List<double> _eyeOpennesHistory = [];
-  final int _maxHistorySize = 3;
+  final int _maxHistorySize = 2;
+  bool _wasClosed = false;
+  DateTime? _lastClosedAt;
   bool _canProceedWithVerification = false;
   DateTime? _lastVerificationAt;
 
@@ -186,14 +188,20 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     if (smoothed < closedThreshold) {
       _closedFrames += 1;
       _eyesCurrentlyOpen = false;
+      _wasClosed = true;
+      _lastClosedAt = DateTime.now();
       return false;
     }
 
     if (smoothed > openThreshold) {
-      if (!_eyesCurrentlyOpen && _closedFrames >= _minClosedFrames) {
-        _eyesCurrentlyOpen = true;
+      final now = DateTime.now();
+      final closedRecently = _lastClosedAt != null &&
+          now.difference(_lastClosedAt!) <= const Duration(milliseconds: 350);
+
+      if (_wasClosed && closedRecently && _closedFrames >= _minClosedFrames) {
+        _wasClosed = false;
         _closedFrames = 0;
-        final now = DateTime.now();
+        _eyesCurrentlyOpen = true;
         if (_lastBlinkAt == null ||
             now.difference(_lastBlinkAt!) > _blinkDebounce) {
           _lastBlinkAt = now;
@@ -202,6 +210,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       } else {
         _closedFrames = 0;
         _eyesCurrentlyOpen = true;
+        _wasClosed = false;
       }
     }
 

@@ -438,15 +438,19 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     }
 
     final previewSize = _controller.value.previewSize;
-    final painterSize = previewSize == null
+    final mediaQuery = MediaQuery.of(context);
+    final isPortrait = mediaQuery.orientation == Orientation.portrait;
+    final effectivePreviewSize = previewSize == null
         ? const Size(1, 1)
-        : Size(previewSize.width, previewSize.height);
+        : (isPortrait
+            ? Size(previewSize.height, previewSize.width)
+            : Size(previewSize.width, previewSize.height));
 
-    final screenSize = MediaQuery.of(context).size;
-    final deviceAspectRatio = screenSize.width / screenSize.height;
-    final previewAspectRatio = previewSize == null
-        ? deviceAspectRatio
-        : previewSize.width / previewSize.height;
+    final painterSize = effectivePreviewSize;
+
+    final deviceAspectRatio = mediaQuery.size.width / mediaQuery.size.height;
+    final previewAspectRatio =
+        effectivePreviewSize.width / effectivePreviewSize.height;
     final scale = previewAspectRatio / deviceAspectRatio;
 
     final cameraLayer = previewSize == null

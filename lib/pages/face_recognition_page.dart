@@ -45,16 +45,16 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   final int _requiredBlinks = 2;
   final double _eyeOpenThreshold = 0.38;
   final double _eyeClosedThreshold = 0.32;
-  final int _baselineTargetSamples = 3;
-  final int _minClosedFrames = 1;
-  final Duration _blinkDebounce = Duration(milliseconds: 220);
+  final int _baselineTargetSamples = 2;
+  final int _minClosedFrames = 0;
+  final Duration _blinkDebounce = Duration(milliseconds: 120);
   bool _eyesCurrentlyOpen = true;
   DateTime? _lastBlinkAt;
   double? _eyeBaseline;
   int _baselineSamples = 0;
   int _closedFrames = 0;
   final List<double> _eyeOpennesHistory = [];
-  final int _maxHistorySize = 4;
+  final int _maxHistorySize = 3;
   bool _canProceedWithVerification = false;
   DateTime? _lastVerificationAt;
 

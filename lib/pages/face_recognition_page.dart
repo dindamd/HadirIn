@@ -1,5 +1,6 @@
 ﻿import 'dart:async';
 import 'dart:typed_data';
+import 'dart:ui' show WriteBuffer;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';

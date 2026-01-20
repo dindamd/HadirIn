@@ -224,6 +224,8 @@ class _AdminPageState extends State<AdminPage> {
     final onTimeCount = _summary?.onTime ?? 0;
     final lateCount = _summary?.late ?? 0;
     final absentCount = _summary?.absent ?? 0;
+    final leaveCount = _summary?.leave ?? 0;
+    final sickCount = _summary?.sick ?? 0;
     final items = _summary?.items ?? <AttendanceItem>[];
 
     Widget listSection;
@@ -274,6 +276,9 @@ class _AdminPageState extends State<AdminPage> {
               final isSaving = _savingName == item.name;
               final avatarChar = item.name.isNotEmpty ? item.name[0].toUpperCase() : '?';
               final statusValue = item.status.isNotEmpty ? item.status : 'On Time';
+              const editableStatuses = ["On Time", "Late", "Absent"];
+              final dropdownValue = editableStatuses.contains(statusValue) ? statusValue : null;
+              final statusColor = _getStatusColor(statusValue);
 
               return Card(
                 margin: EdgeInsets.only(bottom: 8),
@@ -287,11 +292,11 @@ class _AdminPageState extends State<AdminPage> {
                     children: [
                       Row(
                         children: [
-                          Stack(
-                            children: [
-                              CircleAvatar(
-                                radius: 24,
-                                backgroundColor: Colors.blue.shade600,
+                              Stack(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 24,
+                                    backgroundColor: Colors.blue.shade600,
                                 child: Text(
                                   avatarChar,
                                   style: TextStyle(
@@ -309,7 +314,7 @@ class _AdminPageState extends State<AdminPage> {
                                   width: 12,
                                   height: 12,
                                   decoration: BoxDecoration(
-                                    color: _getStatusColor(statusValue),
+                                    color: statusColor,
                                     shape: BoxShape.circle,
                                     border: Border.all(
                                       color: Colors.white,
@@ -388,15 +393,23 @@ class _AdminPageState extends State<AdminPage> {
                           Container(
                             padding: EdgeInsets.symmetric(horizontal: 8),
                             decoration: BoxDecoration(
-                              color: _getStatusColor(statusValue).withValues(alpha: 0.1),
+                              color: statusColor.withValues(alpha: 0.1),
                               borderRadius: BorderRadius.circular(6),
                             ),
                             child: DropdownButton<String>(
-                              value: statusValue,
+                              value: dropdownValue,
+                              hint: Text(
+                                statusValue,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: statusColor,
+                                  fontFamily: 'Poppins',
+                                ),
+                              ),
                               underline: SizedBox(),
                               style: TextStyle(
                                 fontSize: 12,
-                                color: _getStatusColor(statusValue),
+                                color: statusColor,
                                 fontFamily: 'Poppins',
                               ),
                               items: const [
@@ -462,6 +475,34 @@ class _AdminPageState extends State<AdminPage> {
                             ),
                         ],
                       ),
+
+                      if (item.reason.trim().isNotEmpty && item.status != "Absent")
+                        Container(
+                          width: double.infinity,
+                          margin: EdgeInsets.only(top: 10),
+                          padding: EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.info_outline, size: 14, color: Colors.grey.shade700),
+                              SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  "Alasan: ${item.reason}",
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey.shade800,
+                                    fontFamily: 'Poppins',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
 
                       if (item.status == "Absent")
                         Container(
@@ -648,6 +689,34 @@ class _AdminPageState extends State<AdminPage> {
             ),
           ),
 
+          // Additional status row (leave/sick)
+          Container(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _buildStatCard(
+                    "Izin",
+                    leaveCount.toString(),
+                    Colors.blueGrey,
+                    Icons.event_busy,
+                  ),
+                ),
+                SizedBox(width: 12),
+                Expanded(
+                  child: _buildStatCard(
+                    "Sakit",
+                    sickCount.toString(),
+                    Colors.purple,
+                    Icons.healing,
+                  ),
+                ),
+                SizedBox(width: 12),
+                Expanded(child: SizedBox.shrink()),
+              ],
+            ),
+          ),
+
           // List Header
           Padding(
             padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -753,8 +822,14 @@ class _AdminPageState extends State<AdminPage> {
         return Colors.green;
       case "Late":
         return Colors.orange;
+      case "Leave":
+        return Colors.blueGrey;
+      case "Sick":
+        return Colors.purple;
       case "Absent":
         return Colors.red;
+      case "Early":
+        return Colors.teal;
       default:
         return Colors.grey;
     }

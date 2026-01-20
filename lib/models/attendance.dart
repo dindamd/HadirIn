@@ -81,12 +81,16 @@ class AttendanceSummary {
     required this.onTime,
     required this.late,
     required this.absent,
+    required this.leave,
+    required this.sick,
   });
 
   final List<AttendanceItem> items;
   final int onTime;
   final int late;
   final int absent;
+  final int leave;
+  final int sick;
 
   int get total => items.length;
 
@@ -102,6 +106,8 @@ class AttendanceSummary {
       onTime: int.tryParse(counts['on_time']?.toString() ?? '0') ?? 0,
       late: int.tryParse(counts['late']?.toString() ?? '0') ?? 0,
       absent: int.tryParse(counts['absent']?.toString() ?? '0') ?? 0,
+      leave: int.tryParse(counts['leave']?.toString() ?? '0') ?? 0,
+      sick: int.tryParse(counts['sick']?.toString() ?? '0') ?? 0,
     );
   }
 }

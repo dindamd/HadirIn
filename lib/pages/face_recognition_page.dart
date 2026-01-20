@@ -440,30 +440,36 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     final previewSize = _controller.value.previewSize;
     final painterSize = previewSize == null
         ? const Size(1, 1)
-        : (previewSize.width > previewSize.height
-            ? Size(previewSize.height, previewSize.width)
-            : Size(previewSize.width, previewSize.height));
+        : Size(previewSize.width, previewSize.height);
+
+    final screenSize = MediaQuery.of(context).size;
+    final deviceAspectRatio = screenSize.width / screenSize.height;
+    final previewAspectRatio = previewSize == null
+        ? deviceAspectRatio
+        : previewSize.width / previewSize.height;
+    final scale = previewAspectRatio / deviceAspectRatio;
 
     final cameraLayer = previewSize == null
         ? Container(color: Colors.black)
-        : FittedBox(
-            fit: BoxFit.cover,
-            child: SizedBox(
-              width: previewSize.width,
-              height: previewSize.height,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  CameraPreview(_controller),
-                  CustomPaint(
-                    painter: ModernFacePainter(
-                      faces: _faces,
-                      imageSize: painterSize,
-                      animation: _pulseAnimation,
-                      isLivenessActive: _isLivenessCheckActive,
+        : Transform.scale(
+            scale: scale < 1 ? 1 / scale : scale,
+            child: Center(
+              child: AspectRatio(
+                aspectRatio: previewAspectRatio,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    CameraPreview(_controller),
+                    CustomPaint(
+                      painter: ModernFacePainter(
+                        faces: _faces,
+                        imageSize: painterSize,
+                        animation: _pulseAnimation,
+                        isLivenessActive: _isLivenessCheckActive,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           );

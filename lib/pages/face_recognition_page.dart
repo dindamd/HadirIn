@@ -30,6 +30,8 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   bool _isDetecting = false;
   bool _isVerifying = false;
   bool _pendingVerification = false;
+  DateTime? _lastFrameProcessedAt;
+  final Duration _frameInterval = const Duration(milliseconds: 140);
   int _selectedCameraIndex = 0;
   List<Face> _faces = [];
   String attendanceStatus = "Belum";
@@ -107,6 +109,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       widget.cameras[_selectedCameraIndex],
       ResolutionPreset.medium,
       enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
 
     try {
@@ -219,13 +222,20 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     try {
       await _controller.startImageStream((CameraImage image) async {
         if (_isDetecting || _isVerifying) return;
+        final now = DateTime.now();
+        if (_lastFrameProcessedAt != null &&
+            now.difference(_lastFrameProcessedAt!) < _frameInterval) {
+          return;
+        }
+        _lastFrameProcessedAt = now;
         _isDetecting = true;
 
         try {
-          final bytes = image.planes.fold<Uint8List>(
-            Uint8List(0),
-            (previous, plane) => Uint8List.fromList(previous + plane.bytes),
-          );
+          final WriteBuffer allBytes = WriteBuffer();
+          for (final plane in image.planes) {
+            allBytes.putUint8List(plane.bytes);
+          }
+          final bytes = allBytes.done().buffer.asUint8List();
 
           final Size imageSize =
               Size(image.width.toDouble(), image.height.toDouble());
@@ -427,26 +437,35 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     }
 
     final previewSize = _controller.value.previewSize;
-    final screenWidth = MediaQuery.of(context).size.width;
-    final displayWidth = screenWidth - 32;
-    final aspect = previewSize == null
-        ? 0.75
-        : (previewSize.width > previewSize.height)
-            ? previewSize.height / previewSize.width
-            : previewSize.width / previewSize.height;
-    final displayHeight = displayWidth / aspect;
-    final painterSize = Size(
-      previewSize == null
-          ? 1
-          : (previewSize.width > previewSize.height
-              ? previewSize.height
-              : previewSize.width),
-      previewSize == null
-          ? 1
-          : (previewSize.width > previewSize.height
-              ? previewSize.width
-              : previewSize.height),
-    );
+    final painterSize = previewSize == null
+        ? const Size(1, 1)
+        : (previewSize.width > previewSize.height
+            ? Size(previewSize.height, previewSize.width)
+            : Size(previewSize.width, previewSize.height));
+
+    final cameraLayer = previewSize == null
+        ? Container(color: Colors.black)
+        : FittedBox(
+            fit: BoxFit.cover,
+            child: SizedBox(
+              width: previewSize.width,
+              height: previewSize.height,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CameraPreview(_controller),
+                  CustomPaint(
+                    painter: ModernFacePainter(
+                      faces: _faces,
+                      imageSize: painterSize,
+                      animation: _pulseAnimation,
+                      isLivenessActive: _isLivenessCheckActive,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -496,269 +515,177 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
         ],
       ),
       body: Stack(
+        fit: StackFit.expand,
         children: [
-          Center(
-            child: Container(
-              margin: EdgeInsets.only(top: 120, bottom: 180),
-              width: displayWidth,
-              height: displayHeight,
+          Positioned.fill(child: cameraLayer),
+          Positioned.fill(
+            child: DecoratedBox(
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.blue.withValues(alpha: 0.3),
-                    blurRadius: 20,
-                    spreadRadius: 2,
-                  ),
-                ],
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(24),
-                child: AspectRatio(
-                  aspectRatio: aspect,
-                  child: CameraPreview(_controller),
-                ),
-              ),
-            ),
-          ),
-
-          Center(
-            child: Container(
-              margin: EdgeInsets.only(top: 120, bottom: 180),
-              width: displayWidth,
-              height: displayHeight,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(24),
-                child: CustomPaint(
-                  painter: ModernFacePainter(
-                    faces: _faces,
-                    imageSize: painterSize,
-                    animation: _pulseAnimation,
-                    isLivenessActive: _isLivenessCheckActive,
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-          Positioned(
-            top: 140,
-            left: 24,
-            right: 24,
-            child: AnimatedBuilder(
-              animation: _successController,
-              builder: (context, child) {
-                Color startColor;
-                Color endColor;
-                if (attendanceStatus == "Berhasil") {
-                  startColor = Colors.green.shade400;
-                  endColor = Colors.green.shade600;
-                } else if (attendanceStatus == "Gagal") {
-                  startColor = Colors.red.shade400;
-                  endColor = Colors.red.shade600;
-                } else if (_isLivenessCheckActive) {
-                  startColor = Colors.orange.shade400;
-                  endColor = Colors.orange.shade600;
-                } else {
-                  startColor = Colors.blue.shade400;
-                  endColor = Colors.blue.shade600;
-                }
-
-                final shadowColor = attendanceStatus == "Berhasil"
-                    ? Colors.green
-                    : attendanceStatus == "Gagal"
-                        ? Colors.red
-                        : _isLivenessCheckActive
-                            ? Colors.orange
-                            : Colors.blue;
-
-                return Transform.scale(
-                  scale: 1.0 + (_successAnimation.value * 0.1),
-                  child: Container(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [startColor, endColor],
-                      ),
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
-                        BoxShadow(
-                          color: shadowColor.withValues(alpha: 0.3),
-                          blurRadius: 12,
-                          offset: Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            statusMessage,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                              fontFamily: 'Poppins',
-                            ),
-                          ),
-                        ),
-                        if (_isVerifying)
-                          SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor:
-                                  AlwaysStoppedAnimation<Color>(Colors.white),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-
-          if (_isLivenessCheckActive)
-            Positioned(
-              top: 210,
-              left: 24,
-              child: Container(
-                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.orange.withValues(alpha: 0.9),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.remove_red_eye,
-                      color: Colors.white,
-                      size: 16,
-                    ),
-                    SizedBox(width: 8),
-                    Text(
-                      "Kedipan: $_blinkCount/$_requiredBlinks",
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        fontFamily: 'Poppins',
-                      ),
-                    ),
+                gradient: LinearGradient(
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.65),
+                    Colors.black.withValues(alpha: 0.2),
+                    Colors.black.withValues(alpha: 0.05),
                   ],
+                  stops: const [0.0, 0.35, 1.0],
                 ),
-              ),
-            ),
-
-          Positioned(
-            top: 210,
-            left: _isLivenessCheckActive ? 180 : 24,
-            child: Container(
-              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.7),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                  color: _faces.isNotEmpty ? Colors.green : Colors.orange,
-                  width: 1,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.face,
-                    color: _faces.isNotEmpty ? Colors.green : Colors.orange,
-                    size: 16,
-                  ),
-                  SizedBox(width: 8),
-                  Text(
-                    "Wajah: ${_faces.length}",
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      fontFamily: 'Poppins',
-                    ),
-                  ),
-                ],
               ),
             ),
           ),
-
-          Positioned(
-            bottom: 120,
-            left: 24,
-            right: 24,
-            child: Container(
-              padding: EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(20),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.1),
-                    blurRadius: 20,
-                    offset: Offset(0, 10),
-                  ),
-                ],
-              ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  AnimatedBuilder(
+                    animation: _successController,
+                    builder: (context, child) {
+                      Color startColor;
+                      Color endColor;
+                      if (attendanceStatus == "Berhasil") {
+                        startColor = Colors.green.shade400;
+                        endColor = Colors.green.shade600;
+                      } else if (attendanceStatus == "Gagal") {
+                        startColor = Colors.red.shade400;
+                        endColor = Colors.red.shade600;
+                      } else if (_isLivenessCheckActive) {
+                        startColor = Colors.orange.shade400;
+                        endColor = Colors.orange.shade600;
+                      } else {
+                        startColor = Colors.blue.shade400;
+                        endColor = Colors.blue.shade600;
+                      }
+
+                      final shadowColor = attendanceStatus == "Berhasil"
+                          ? Colors.green
+                          : attendanceStatus == "Gagal"
+                              ? Colors.red
+                              : _isLivenessCheckActive
+                                  ? Colors.orange
+                                  : Colors.blue;
+
+                      return Transform.scale(
+                        scale: 1.0 + (_successAnimation.value * 0.1),
+                        child: Container(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 20, vertical: 12),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [startColor, endColor],
+                            ),
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: shadowColor.withValues(alpha: 0.3),
+                                blurRadius: 12,
+                                offset: Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 8,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  statusMessage,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    fontFamily: 'Poppins',
+                                  ),
+                                ),
+                              ),
+                              if (_isVerifying)
+                                SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(
+                                        Colors.white),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  SizedBox(height: 12),
                   Row(
                     children: [
-                      Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          color: Colors.blue.shade50,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Icon(
-                          _isLivenessCheckActive
-                              ? Icons.remove_red_eye
-                              : Icons.info_outline,
-                          color: Colors.blue.shade600,
-                          size: 20,
-                        ),
-                      ),
-                      SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              _isLivenessCheckActive
-                                  ? "Instruksi Kedip"
-                                  : "Instruksi Scan",
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                fontFamily: 'Poppins',
-                                color: Colors.black87,
+                      if (_isLivenessCheckActive)
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withValues(alpha: 0.85),
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.remove_red_eye,
+                                color: Colors.white,
+                                size: 16,
                               ),
+                              SizedBox(width: 8),
+                              Text(
+                                "Kedipan: $_blinkCount/$_requiredBlinks",
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  fontFamily: 'Poppins',
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (_isLivenessCheckActive) SizedBox(width: 10),
+                      Container(
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.65),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: _faces.isNotEmpty
+                                ? Colors.greenAccent
+                                : Colors.orangeAccent,
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.face_retouching_natural,
+                              color: _faces.isNotEmpty
+                                  ? Colors.greenAccent
+                                  : Colors.orangeAccent,
+                              size: 16,
                             ),
+                            SizedBox(width: 8),
                             Text(
-                              _isLivenessCheckActive
-                                  ? "Berkedip $_requiredBlinks kali untuk verifikasi anti-foto"
-                                  : _isVerifying
-                                      ? "Sedang memverifikasi wajah ke server..."
-                                      : "Posisikan wajah dalam frame dan tunggu",
+                              "Wajah: ${_faces.length}",
                               style: TextStyle(
+                                color: Colors.white,
                                 fontSize: 12,
-                                color: Colors.black54,
+                                fontWeight: FontWeight.w600,
                                 fontFamily: 'Poppins',
                               ),
                             ),
@@ -766,6 +693,84 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
                         ),
                       ),
                     ],
+                  ),
+                  Spacer(),
+                  Container(
+                    width: double.infinity,
+                    padding: EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.95),
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.1),
+                          blurRadius: 20,
+                          offset: Offset(0, 10),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade50,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Icon(
+                            _isLivenessCheckActive
+                                ? Icons.remove_red_eye
+                                : Icons.camera_alt_outlined,
+                            color: Colors.blue.shade600,
+                            size: 22,
+                          ),
+                        ),
+                        SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _isLivenessCheckActive
+                                    ? "Instruksi Kedip"
+                                    : "Instruksi Scan",
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                  fontFamily: 'Poppins',
+                                  color: Colors.black87,
+                                ),
+                              ),
+                              Text(
+                                _isLivenessCheckActive
+                                    ? "Berkedip $_requiredBlinks kali untuk verifikasi anti-foto"
+                                    : _isVerifying
+                                        ? "Sedang memverifikasi wajah ke server..."
+                                        : "Posisikan wajah dalam frame dan tunggu",
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.black54,
+                                  fontFamily: 'Poppins',
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        SizedBox(width: 8),
+                        if (_isVerifying)
+                          SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Colors.blue.shade600,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ],
               ),

@@ -135,7 +135,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
     setState(() {
       _isLivenessCheckActive = false;
       _blinkCount = 0;
-      _eyesCurrentlyOpen = true;
       _lastBlinkAt = null;
       _eyeBaseline = null;
       _baselineSamples = 0;

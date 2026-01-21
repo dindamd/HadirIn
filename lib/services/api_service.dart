@@ -73,11 +73,10 @@ class ApiService {
 
   // ================= LARAVEL API =================
 
-  Future<AttendanceSummary> fetchTodayAttendance() async {
+  Future<AttendanceHistory> fetchAttendanceHistory({int days = 7}) async {
     try {
-      final res = await _client
-          .get(_uri('/api/admin/attendance/today'))
-          .timeout(const Duration(seconds: 20));
+      final uri = _uri('/api/admin/attendance/history?days=$days');
+      final res = await _client.get(uri).timeout(const Duration(seconds: 20));
 
       if (res.statusCode < 200 || res.statusCode >= 300) {
         throw ApiException('Gagal memuat data absensi (HTTP ${res.statusCode})');
@@ -88,10 +87,18 @@ class ApiService {
         throw ApiException(body['message']?.toString() ?? 'Respon gagal');
       }
 
-      return AttendanceSummary.fromJson(body);
+      return AttendanceHistory.fromJson(body);
     } on TimeoutException {
-      throw ApiException('Koneksi timeout saat memuat absensi hari ini.');
+      throw ApiException('Koneksi timeout saat memuat absensi harian.');
     }
+  }
+
+  Future<AttendanceSummary> fetchTodayAttendance() async {
+    final history = await fetchAttendanceHistory(days: 1);
+    if (history.days.isEmpty) {
+      throw ApiException('Tidak ada data absensi untuk hari ini.');
+    }
+    return history.days.first;
   }
 
   Future<void> loginAdmin({

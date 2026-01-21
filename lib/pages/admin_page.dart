@@ -15,12 +15,22 @@ class AdminPage extends StatefulWidget {
 
 class _AdminPageState extends State<AdminPage> {
   final ApiService _apiService = ApiService();
-  AttendanceSummary? _summary;
+  AttendanceHistory? _history;
   bool _loading = true;
   String? _error;
   String? _savingName;
   Timer? _refreshTimer;
   bool _requestInFlight = false;
+  int _selectedIndex = 0;
+
+  AttendanceSummary? get _activeSummary {
+    if (_history == null || _history!.days.isEmpty) return null;
+    final maxIndex = _history!.days.length - 1;
+    final index = _selectedIndex.clamp(0, maxIndex) as int;
+    return _history!.days[index];
+  }
+
+  bool get _selectedIsToday => _activeSummary?.isToday ?? false;
 
   @override
   void initState() {
@@ -107,23 +117,31 @@ class _AdminPageState extends State<AdminPage> {
     }
 
     try {
-      final summary = await _apiService.fetchTodayAttendance();
+      final history = await _apiService.fetchAttendanceHistory(days: 7);
       if (!mounted) return;
       setState(() {
-        _summary = summary;
+        _history = history;
         _error = null;
+        if (_selectedIndex >= history.days.length) {
+          _selectedIndex = history.days.isNotEmpty ? history.days.length - 1 : 0;
+        }
+        if (_history?.days.isNotEmpty ?? false) {
+          _selectedIndex = 0;
+        }
         if (showLoading) {
           _loading = false;
         }
       });
     } catch (e) {
       if (!mounted) return;
-      if (showLoading) {
-        setState(() {
-          _error = e.toString();
+      setState(() {
+        if (showLoading) {
           _loading = false;
-        });
-      }
+          _error = e.toString();
+        } else {
+          _error = _error ?? e.toString();
+        }
+      });
     } finally {
       _requestInFlight = false;
     }
@@ -137,6 +155,20 @@ class _AdminPageState extends State<AdminPage> {
     String? time,
     bool auto = false,
   }) async {
+    if (!_selectedIsToday) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Hanya absensi hari ini yang bisa diubah dari sini.'),
+            backgroundColor: Colors.orange.shade700,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+      return;
+    }
+
     setState(() {
       _savingName = item.name;
     });
@@ -221,13 +253,16 @@ class _AdminPageState extends State<AdminPage> {
 
   @override
   Widget build(BuildContext context) {
-    final onTimeCount = _summary?.onTime ?? 0;
-    final lateCount = _summary?.late ?? 0;
-    final absentCount = _summary?.absent ?? 0;
-    final leaveCount = _summary?.leave ?? 0;
-    final sickCount = _summary?.sick ?? 0;
-    final items = _summary?.items ?? <AttendanceItem>[];
-    final summaryDate = _summary?.date ?? '';
+    final activeSummary = _activeSummary;
+    final onTimeCount = activeSummary?.onTime ?? 0;
+    final lateCount = activeSummary?.late ?? 0;
+    final absentCount = activeSummary?.absent ?? 0;
+    final leaveCount = activeSummary?.leave ?? 0;
+    final sickCount = activeSummary?.sick ?? 0;
+    final items = activeSummary?.items ?? <AttendanceItem>[];
+    final summaryDate = activeSummary?.friendlyLabel ?? '';
+    final summaryIsoDate = activeSummary?.date ?? '';
+    final selectedIsToday = activeSummary?.isToday ?? false;
 
     Widget listSection;
     if (_loading) {
@@ -265,326 +300,367 @@ class _AdminPageState extends State<AdminPage> {
         ),
       );
     } else {
-      listSection = Expanded(
-        child: RefreshIndicator(
-          onRefresh: () => _loadAttendance(showLoading: false),
-          child: ListView.builder(
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: EdgeInsets.symmetric(horizontal: 16),
-            itemCount: items.length,
-            itemBuilder: (context, index) {
-              final item = items[index];
-              final isSaving = _savingName == item.name;
-              final avatarChar = item.name.isNotEmpty ? item.name[0].toUpperCase() : '?';
-              final statusValue = item.status.isNotEmpty ? item.status : 'On Time';
-              const editableStatuses = ["On Time", "Late", "Absent"];
-              final dropdownValue = editableStatuses.contains(statusValue) ? statusValue : null;
-              final statusColor = _getStatusColor(statusValue);
-
-              return Card(
-                margin: EdgeInsets.only(bottom: 8),
-                elevation: 2,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+      Widget listView;
+      if (items.isEmpty) {
+        listView = ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: EdgeInsets.symmetric(horizontal: 16),
+          children: [
+            SizedBox(height: 40),
+            Center(
+              child: Text(
+                'Belum ada data absensi pada rentang ini.',
+                style: TextStyle(
+                  fontFamily: 'Poppins',
+                  color: Colors.grey.shade600,
                 ),
-                child: Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                              Stack(
-                                children: [
-                                  CircleAvatar(
-                                    radius: 24,
-                                    backgroundColor: Colors.blue.shade600,
-                                child: Text(
-                                  avatarChar,
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w600,
-                                    fontFamily: 'Poppins',
-                                  ),
-                                ),
-                              ),
-                              Positioned(
-                                right: 0,
-                                bottom: 0,
-                                child: Container(
-                                  width: 12,
-                                  height: 12,
-                                  decoration: BoxDecoration(
-                                    color: statusColor,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: Colors.white,
-                                      width: 2,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
+              ),
+            ),
+          ],
+        );
+      } else {
+        listView = ListView.builder(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: EdgeInsets.symmetric(horizontal: 16),
+          itemCount: items.length,
+          itemBuilder: (context, index) {
+            final item = items[index];
+            final isSaving = _savingName == item.name;
+            final disableActions = isSaving || !selectedIsToday;
+            final avatarChar = item.name.isNotEmpty ? item.name[0].toUpperCase() : '?';
+            final statusValue = item.status.isNotEmpty ? item.status : 'On Time';
+            const editableStatuses = ["On Time", "Late", "Absent"];
+            final dropdownValue = editableStatuses.contains(statusValue) ? statusValue : null;
+            final statusColor = _getStatusColor(statusValue);
+
+            return Card(
+              margin: EdgeInsets.only(bottom: 8),
+              elevation: 2,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    if (!selectedIsToday)
+                      Container(
+                        width: double.infinity,
+                        padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        margin: EdgeInsets.only(bottom: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.blueGrey.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'Riwayat hari lalu — hanya bisa dibaca',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.blueGrey.shade700,
+                            fontFamily: 'Poppins',
                           ),
-
-                          SizedBox(width: 12),
-
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                        ),
+                      ),
+                    Row(
+                      children: [
+                            Stack(
                               children: [
-                                Text(
-                                  item.name,
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 14,
-                                    fontFamily: 'Poppins',
-                                  ),
-                                ),
-                                SizedBox(height: 4),
-                                Wrap(
-                                  spacing: 10,
-                                  runSpacing: 4,
-                                  crossAxisAlignment: WrapCrossAlignment.center,
-                                  children: [
-                                    Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          Icons.login,
-                                          size: 12,
-                                          color: Colors.grey.shade600,
-                                        ),
-                                        SizedBox(width: 4),
-                                        Text(
-                                          "Masuk: ${item.checkInLabel}",
-                                          style: TextStyle(
-                                            color: Colors.grey.shade600,
-                                            fontSize: 12,
-                                            fontFamily: 'Poppins',
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          Icons.logout,
-                                          size: 12,
-                                          color: Colors.grey.shade600,
-                                        ),
-                                        SizedBox(width: 4),
-                                        Text(
-                                          "Pulang: ${item.checkOutLabel}",
-                                          style: TextStyle(
-                                            color: Colors.grey.shade600,
-                                            fontSize: 12,
-                                            fontFamily: 'Poppins',
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-
-                          Container(
-                            padding: EdgeInsets.symmetric(horizontal: 8),
-                            decoration: BoxDecoration(
-                              color: statusColor.withValues(alpha: 0.1),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: DropdownButton<String>(
-                              value: dropdownValue,
-                              hint: Text(
-                                statusValue,
+                                CircleAvatar(
+                                  radius: 24,
+                                  backgroundColor: Colors.blue.shade600,
+                              child: Text(
+                                avatarChar,
                                 style: TextStyle(
-                                  fontSize: 12,
-                                  color: statusColor,
+                                  color: Colors.white,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
                                   fontFamily: 'Poppins',
                                 ),
                               ),
-                              underline: SizedBox(),
+                            ),
+                            Positioned(
+                              right: 0,
+                              bottom: 0,
+                              child: Container(
+                                width: 12,
+                                height: 12,
+                                decoration: BoxDecoration(
+                                  color: statusColor,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 2,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        SizedBox(width: 12),
+
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.name,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 14,
+                                  fontFamily: 'Poppins',
+                                ),
+                              ),
+                              SizedBox(height: 4),
+                              Wrap(
+                                spacing: 10,
+                                runSpacing: 4,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.login,
+                                        size: 12,
+                                        color: Colors.grey.shade600,
+                                      ),
+                                      SizedBox(width: 4),
+                                      Text(
+                                        "Masuk: ${item.checkInLabel}",
+                                        style: TextStyle(
+                                          color: Colors.grey.shade600,
+                                          fontSize: 12,
+                                          fontFamily: 'Poppins',
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.logout,
+                                        size: 12,
+                                        color: Colors.grey.shade600,
+                                      ),
+                                      SizedBox(width: 4),
+                                      Text(
+                                        "Pulang: ${item.checkOutLabel}",
+                                        style: TextStyle(
+                                          color: Colors.grey.shade600,
+                                          fontSize: 12,
+                                          fontFamily: 'Poppins',
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+
+                        Container(
+                          padding: EdgeInsets.symmetric(horizontal: 8),
+                          decoration: BoxDecoration(
+                            color: statusColor.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: DropdownButton<String>(
+                            value: dropdownValue,
+                            hint: Text(
+                              statusValue,
                               style: TextStyle(
                                 fontSize: 12,
                                 color: statusColor,
                                 fontFamily: 'Poppins',
                               ),
-                              items: const [
-                                DropdownMenuItem(value: "On Time", child: Text("On Time")),
-                                DropdownMenuItem(value: "Late", child: Text("Late")),
-                                DropdownMenuItem(value: "Absent", child: Text("Absent")),
-                              ],
-                              onChanged: isSaving
-                                  ? null
-                                  : (value) {
-                                      if (value == null) return;
-                                      _updateAttendance(item, status: value, reason: item.reason);
-                                    },
                             ),
-                          ),
-                        ],
-                      ),
-
-                      SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 6,
-                        children: [
-                          TextButton.icon(
-                            onPressed: isSaving ? null : () => _editTime(item, 'IN'),
-                            icon: Icon(Icons.login, size: 16),
-                            label: Text("Ubah Masuk"),
-                            style: TextButton.styleFrom(
-                              foregroundColor: Colors.blueGrey.shade700,
-                              backgroundColor: Colors.blueGrey.shade50,
-                              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
+                            underline: SizedBox(),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: statusColor,
+                              fontFamily: 'Poppins',
                             ),
-                          ),
-                          TextButton.icon(
-                            onPressed: isSaving ? null : () => _editTime(item, 'OUT'),
-                            icon: Icon(Icons.logout, size: 16),
-                            label: Text("Ubah Pulang"),
-                            style: TextButton.styleFrom(
-                              foregroundColor: Colors.blueGrey.shade700,
-                              backgroundColor: Colors.blueGrey.shade50,
-                              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                            ),
-                          ),
-                          if (isSaving)
-                            Padding(
-                              padding: EdgeInsets.only(left: 4, top: 6),
-                              child: SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(
-                                    Colors.blueGrey.shade600,
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-
-                      if (item.reason.trim().isNotEmpty && item.status != "Absent")
-                        Container(
-                          width: double.infinity,
-                          margin: EdgeInsets.only(top: 10),
-                          padding: EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Icon(Icons.info_outline, size: 14, color: Colors.grey.shade700),
-                              SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  "Alasan: ${item.reason}",
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey.shade800,
-                                    fontFamily: 'Poppins',
-                                  ),
-                                ),
-                              ),
+                            items: const [
+                              DropdownMenuItem(value: "On Time", child: Text("On Time")),
+                              DropdownMenuItem(value: "Late", child: Text("Late")),
+                              DropdownMenuItem(value: "Absent", child: Text("Absent")),
                             ],
+                            onChanged: disableActions
+                                ? null
+                                : (value) {
+                                    if (value == null) return;
+                                    _updateAttendance(item, status: value, reason: item.reason);
+                                  },
                           ),
                         ),
+                      ],
+                    ),
 
-                      if (item.status == "Absent")
-                        Container(
-                          margin: EdgeInsets.only(top: 12),
-                          padding: EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Colors.red.shade50,
-                            borderRadius: BorderRadius.circular(6),
+                    SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: [
+                        TextButton.icon(
+                          onPressed: disableActions ? null : () => _editTime(item, 'IN'),
+                          icon: Icon(Icons.login, size: 16),
+                          label: Text("Ubah Masuk"),
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.blueGrey.shade700,
+                            backgroundColor: Colors.blueGrey.shade50,
+                            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
                           ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.info_outline,
-                                size: 14,
-                                color: Colors.red.shade600,
+                        ),
+                        TextButton.icon(
+                          onPressed: disableActions ? null : () => _editTime(item, 'OUT'),
+                          icon: Icon(Icons.logout, size: 16),
+                          label: Text("Ubah Pulang"),
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.blueGrey.shade700,
+                            backgroundColor: Colors.blueGrey.shade50,
+                            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
+                        ),
+                        if (isSaving)
+                          Padding(
+                            padding: EdgeInsets.only(left: 4, top: 6),
+                            child: SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Colors.blueGrey.shade600,
+                                ),
                               ),
-                              SizedBox(width: 8),
-                              Text(
-                                "Alasan:",
+                            ),
+                          ),
+                      ],
+                    ),
+
+                    if (item.reason.trim().isNotEmpty && item.status != "Absent")
+                      Container(
+                        width: double.infinity,
+                        margin: EdgeInsets.only(top: 10),
+                        padding: EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(Icons.info_outline, size: 14, color: Colors.grey.shade700),
+                            SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                "Alasan: ${item.reason}",
                                 style: TextStyle(
                                   fontSize: 12,
-                                  color: Colors.red.shade700,
+                                  color: Colors.grey.shade800,
                                   fontFamily: 'Poppins',
                                 ),
                               ),
-                              SizedBox(width: 8),
-                              Expanded(
-                                child: DropdownButton<String>(
-                                  value: item.reason.isEmpty ? null : item.reason,
-                                  hint: Text(
-                                    "Pilih alasan",
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.red.shade400,
-                                      fontFamily: 'Poppins',
-                                    ),
-                                  ),
-                                  isExpanded: true,
-                                  underline: SizedBox(),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                    if (item.status == "Absent")
+                      Container(
+                        margin: EdgeInsets.only(top: 12),
+                        padding: EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.red.shade50,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.info_outline,
+                              size: 14,
+                              color: Colors.red.shade600,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              "Alasan:",
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.red.shade700,
+                                fontFamily: 'Poppins',
+                              ),
+                            ),
+                            SizedBox(width: 8),
+                            Expanded(
+                              child: DropdownButton<String>(
+                                value: item.reason.isEmpty ? null : item.reason,
+                                hint: Text(
+                                  "Pilih alasan",
                                   style: TextStyle(
                                     fontSize: 11,
-                                    color: Colors.red.shade700,
+                                    color: Colors.red.shade400,
                                     fontFamily: 'Poppins',
                                   ),
-                                  items: const [
-                                    DropdownMenuItem(value: "Sakit", child: Text("Sakit")),
-                                    DropdownMenuItem(value: "Izin", child: Text("Izin")),
-                                    DropdownMenuItem(value: "Tanpa Keterangan", child: Text("Tanpa Keterangan")),
-                                  ],
-                                  onChanged: isSaving
-                                      ? null
-                                      : (value) {
-                                          _updateAttendance(
-                                            item,
-                                            status: "Absent",
-                                            reason: value ?? '',
-                                          );
-                                        },
                                 ),
+                                isExpanded: true,
+                                underline: SizedBox(),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.red.shade700,
+                                  fontFamily: 'Poppins',
+                                ),
+                                items: const [
+                                  DropdownMenuItem(value: "Sakit", child: Text("Sakit")),
+                                  DropdownMenuItem(value: "Izin", child: Text("Izin")),
+                                  DropdownMenuItem(value: "Tanpa Keterangan", child: Text("Tanpa Keterangan")),
+                                ],
+                                onChanged: disableActions
+                                    ? null
+                                    : (value) {
+                                        _updateAttendance(
+                                          item,
+                                          status: "Absent",
+                                          reason: value ?? '',
+                                        );
+                                      },
                               ),
-                              if (isSaving)
-                                Padding(
-                                  padding: const EdgeInsets.only(left: 8.0),
-                                  child: SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      valueColor: AlwaysStoppedAnimation<Color>(Colors.red.shade600),
-                                    ),
+                            ),
+                            if (isSaving)
+                              Padding(
+                                padding: const EdgeInsets.only(left: 8.0),
+                                child: SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.red.shade600),
                                   ),
                                 ),
-                            ],
-                          ),
+                              ),
+                          ],
                         ),
-                    ],
-                  ),
+                      ),
+                  ],
                 ),
-              );
-            },
-          ),
+              ),
+            );
+          },
+        );
+      }
+
+      listSection = Expanded(
+        child: RefreshIndicator(
+          onRefresh: () => _loadAttendance(showLoading: false),
+          child: listView,
         ),
       );
     }
@@ -656,6 +732,9 @@ class _AdminPageState extends State<AdminPage> {
             ],
           ),
         ),
+
+          _buildRetentionNotice(),
+          _buildDateSelector(),
 
           // Statistics Cards
           Container(
@@ -740,6 +819,44 @@ class _AdminPageState extends State<AdminPage> {
                     color: Colors.black87,
                   ),
                 ),
+                if (summaryIsoDate.isNotEmpty)
+                  Padding(
+                    padding: EdgeInsets.only(left: 8),
+                    child: Container(
+                      padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        summaryIsoDate,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.blue.shade700,
+                          fontFamily: 'Poppins',
+                        ),
+                      ),
+                    ),
+                  ),
+                if (!selectedIsToday)
+                  Padding(
+                    padding: EdgeInsets.only(left: 6),
+                    child: Container(
+                      padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        "Riwayat",
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.orange.shade700,
+                          fontFamily: 'Poppins',
+                        ),
+                      ),
+                    ),
+                  ),
                 Spacer(),
                 Container(
                   padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -771,6 +888,115 @@ class _AdminPageState extends State<AdminPage> {
     _refreshTimer?.cancel();
     _apiService.dispose();
     super.dispose();
+  }
+
+  Widget _buildRetentionNotice() {
+    final notice = _history?.retention;
+    if (notice == null || notice.show == false) {
+      return SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      margin: EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.orange.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Backup data absensi',
+            style: TextStyle(
+              fontFamily: 'Poppins',
+              fontWeight: FontWeight.w600,
+              color: Colors.orange.shade800,
+            ),
+          ),
+          SizedBox(height: 6),
+          Text(
+            notice.message ?? 'Data lama akan dibersihkan, segera lakukan backup.',
+            style: TextStyle(
+              fontFamily: 'Poppins',
+              fontSize: 12,
+              color: Colors.orange.shade800,
+            ),
+          ),
+          SizedBox(height: 6),
+          Text(
+            'Cutoff ${notice.cutoffDate ?? '-'} · Jadwal bersih ${notice.nextPurgeAt ?? '-'}',
+            style: TextStyle(
+              fontFamily: 'Poppins',
+              fontSize: 11,
+              color: Colors.orange.shade700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDateSelector() {
+    final days = _history?.days ?? [];
+    if (days.isEmpty) return SizedBox.shrink();
+
+    final activeIndex = _history!.days.isEmpty ? 0 : _selectedIndex.clamp(0, _history!.days.length - 1) as int;
+
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.fromLTRB(16, 8, 16, 12),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: List.generate(days.length, (index) {
+            final day = days[index];
+            final isActive = index == activeIndex;
+            return Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: ChoiceChip(
+                labelPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                label: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      day.friendlyLabel,
+                      style: TextStyle(
+                        fontFamily: 'Poppins',
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                      ),
+                    ),
+                    Text(
+                      day.date,
+                      style: TextStyle(
+                        fontFamily: 'Poppins',
+                        fontSize: 11,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                  ],
+                ),
+                selected: isActive,
+                selectedColor: Colors.blue.shade50,
+                backgroundColor: Colors.white,
+                side: BorderSide(color: isActive ? Colors.blue.shade400 : Colors.grey.shade300),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                onSelected: (value) {
+                  if (!value) return;
+                  setState(() {
+                    _selectedIndex = index;
+                  });
+                },
+              ),
+            );
+          }),
+        ),
+      ),
+    );
   }
 
   Widget _buildStatCard(String title, String count, Color color, IconData icon) {

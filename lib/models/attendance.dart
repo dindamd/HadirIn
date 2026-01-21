@@ -1,3 +1,66 @@
+import 'package:intl/intl.dart';
+
+class RetentionNotice {
+  const RetentionNotice({
+    required this.show,
+    this.message,
+    this.cutoffDate,
+    this.oldestDate,
+    this.nextPurgeAt,
+    this.recordsPending = 0,
+  });
+
+  final bool show;
+  final String? message;
+  final String? cutoffDate;
+  final String? oldestDate;
+  final String? nextPurgeAt;
+  final int recordsPending;
+
+  factory RetentionNotice.fromJson(Map<String, dynamic> json) {
+    return RetentionNotice(
+      show: json['show'] == true || json['show'] == 1,
+      message: json['message']?.toString(),
+      cutoffDate: json['cutoff_date']?.toString(),
+      oldestDate: json['oldest_date']?.toString(),
+      nextPurgeAt: json['next_purge_at']?.toString(),
+      recordsPending: int.tryParse(json['records_pending']?.toString() ?? '0') ?? 0,
+    );
+  }
+}
+
+class AttendanceHistory {
+  AttendanceHistory({
+    required this.days,
+    required this.start,
+    required this.end,
+    this.retention,
+  });
+
+  final List<AttendanceSummary> days;
+  final String start;
+  final String end;
+  final RetentionNotice? retention;
+
+  AttendanceSummary? get firstDay => days.isNotEmpty ? days.first : null;
+
+  factory AttendanceHistory.fromJson(Map<String, dynamic> json) {
+    final daysJson = (json['days'] as List?) ?? [];
+
+    return AttendanceHistory(
+      days: daysJson
+          .whereType<Map>()
+          .map((e) => AttendanceSummary.fromJson(Map<String, dynamic>.from(e)))
+          .toList(),
+      start: (json['range']?['start'] ?? '').toString(),
+      end: (json['range']?['end'] ?? '').toString(),
+      retention: json['retention_notice'] is Map
+          ? RetentionNotice.fromJson(Map<String, dynamic>.from(json['retention_notice'] as Map))
+          : null,
+    );
+  }
+}
+
 class AttendanceItem {
   AttendanceItem({
     this.employeeId,
@@ -95,6 +158,34 @@ class AttendanceSummary {
   final String date;
 
   int get total => items.length;
+
+  DateTime? get parsedDate {
+    final parsed = DateTime.tryParse(date);
+    if (parsed == null) return null;
+    return DateTime(parsed.year, parsed.month, parsed.day);
+  }
+
+  bool get isToday {
+    final d = parsedDate;
+    if (d == null) return false;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return d == today;
+  }
+
+  String get friendlyLabel {
+    final d = parsedDate;
+    if (d == null) return date;
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+
+    if (d == today) return 'Hari ini';
+    if (d == yesterday) return 'Kemarin';
+
+    return DateFormat('EEE, dd MMM', 'id_ID').format(d);
+  }
 
   factory AttendanceSummary.fromJson(Map<String, dynamic> json) {
     final counts = (json['counts'] as Map?) ?? {};

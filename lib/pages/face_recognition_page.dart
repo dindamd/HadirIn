@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show WriteBuffer;
 
 import 'package:camera/camera.dart';
@@ -48,7 +47,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   final int _baselineTargetSamples = 1;
   final int _minClosedFrames = 0;
   final Duration _blinkDebounce = Duration(milliseconds: 80);
-  bool _eyesCurrentlyOpen = true;
   DateTime? _lastBlinkAt;
   double? _eyeBaseline;
   int _baselineSamples = 0;
@@ -58,7 +56,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
   bool _wasClosed = false;
   DateTime? _lastClosedAt;
   bool _canProceedWithVerification = false;
-  DateTime? _lastVerificationAt;
 
   @override
   void initState() {
@@ -187,7 +184,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
 
     if (smoothed < closedThreshold) {
       _closedFrames += 1;
-      _eyesCurrentlyOpen = false;
       _wasClosed = true;
       _lastClosedAt = DateTime.now();
       return false;
@@ -201,7 +197,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       if (_wasClosed && closedRecently && _closedFrames >= _minClosedFrames) {
         _wasClosed = false;
         _closedFrames = 0;
-        _eyesCurrentlyOpen = true;
         if (_lastBlinkAt == null ||
             now.difference(_lastBlinkAt!) > _blinkDebounce) {
           _lastBlinkAt = now;
@@ -209,7 +204,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
         }
       } else {
         _closedFrames = 0;
-        _eyesCurrentlyOpen = true;
         _wasClosed = false;
       }
     }
@@ -394,7 +388,6 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage>
       if (mounted) {
         _pendingVerification = false;
         _isVerifying = false;
-        _lastVerificationAt = DateTime.now();
         await Future.delayed(const Duration(seconds: 3));
         attendanceStatus = "Belum";
         _resetBlinkDetection();

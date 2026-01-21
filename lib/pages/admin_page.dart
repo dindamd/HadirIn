@@ -26,7 +26,7 @@ class _AdminPageState extends State<AdminPage> {
   AttendanceSummary? get _activeSummary {
     if (_history == null || _history!.days.isEmpty) return null;
     final maxIndex = _history!.days.length - 1;
-    final index = _selectedIndex.clamp(0, maxIndex) as int;
+    final index = _selectedIndex.clamp(0, maxIndex).toInt();
     return _history!.days[index];
   }
 
@@ -721,7 +721,7 @@ class _AdminPageState extends State<AdminPage> {
                 SizedBox(height: 8),
                 Text(
                   summaryDate.isNotEmpty
-                      ? "Data kehadiran untuk ${summaryDate}"
+                      ? "Data kehadiran untuk $summaryDate"
                       : "Kelola data kehadiran karyawan",
                     style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.9),
@@ -943,7 +943,7 @@ class _AdminPageState extends State<AdminPage> {
     final days = _history?.days ?? [];
     if (days.isEmpty) return SizedBox.shrink();
 
-    final activeIndex = _history!.days.isEmpty ? 0 : _selectedIndex.clamp(0, _history!.days.length - 1) as int;
+    final activeIndex = _history!.days.isEmpty ? 0 : _selectedIndex.clamp(0, _history!.days.length - 1).toInt();
 
     return Container(
       width: double.infinity,

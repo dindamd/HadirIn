@@ -184,7 +184,11 @@ class AttendanceSummary {
     if (d == today) return 'Hari ini';
     if (d == yesterday) return 'Kemarin';
 
-    return DateFormat('EEE, dd MMM', 'id_ID').format(d);
+    try {
+      return DateFormat('EEE, dd MMM', 'id_ID').format(d);
+    } catch (_) {
+      return DateFormat('EEE, dd MMM').format(d);
+    }
   }
 
   factory AttendanceSummary.fromJson(Map<String, dynamic> json) {

@@ -1,5 +1,7 @@
-import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:flutter/material.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:intl/intl.dart';
 import 'pages/home_page.dart';
 // ✅ Hapus import camera_page.dart karena sudah tidak diperlukan
 
@@ -7,6 +9,8 @@ late List<CameraDescription> cameras;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  Intl.defaultLocale = 'id_ID';
+  await initializeDateFormatting('id_ID', null);
   cameras = await availableCameras();
   runApp(const MyApp());
 }
